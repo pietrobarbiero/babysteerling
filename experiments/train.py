@@ -320,7 +320,14 @@ def main(cfg: DictConfig):
     print(f"Saved checkpoint to {ckpt_path}")
 
     # sample a short generation and log it to W&B as text, so qualitative output is visible
-    # next to the loss curves
+    # next to the loss curves. eval() here (not just @torch.no_grad() on generate() itself,
+    # which only disables gradient tracking, not train-mode behavior) matters beyond the usual
+    # dropout concern: LiftedTokenPredictor's _RunningCenter keeps updating its running_mean
+    # buffer on every training-mode forward pass, and generation happens after the checkpoint
+    # above is already saved -- without this, the buffer drifts past what's on disk before
+    # log_concept_activation_table reads it, so recomputing from the saved checkpoint later
+    # wouldn't reproduce what got logged
+    model.eval()
     if is_diffusion:
         sample_ids = model.generate(
             mask_token_id, seq_len=cfg.data.block_size,
