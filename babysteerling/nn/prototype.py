@@ -248,6 +248,44 @@ class PrototypePredictor(nn.Module):
         return k_dense
 
 
+class _RunningCenter(nn.Module):
+    """Centers its input by subtracting a running per-feature mean, tracked via a fixed EMA rule
+    over training -- not a learned parameter, so it doesn't need gradient from any loss to find
+    the correction (LiftedTokenPredictor gets none when model.use_concept_loss=False). Instead it
+    measures the offset directly from the forward activations, which is what actually fixes
+    LiftedTokenPredictor's cosine-similarity collapse: trained transformers commonly develop a
+    handful of "massive activation" dimensions with large, roughly token-independent magnitude,
+    which dominate a raw dot product regardless of genuine token content. A learned bias could in
+    principle cancel the same offset, but only if backprop happens to push it there; this doesn't
+    wait on that, and works from a freshly-initialized backbone just as well as a trained one --
+    it just tracks whatever offset currently exists, live, throughout training.
+
+    Deliberately not BatchNorm: forward() always subtracts the slower-moving running_mean, never
+    the current batch's own statistics (which only nudge running_mean, see update()), so it's
+    insensitive to batch size/composition and behaves identically in train() and eval() -- no
+    train/eval discrepancy, no small/uneven-batch instability. No variance normalization either:
+    a near-constant offset (large mean, low variance -- the "massive activation" signature) is
+    fully corrected by centering alone, so there's nothing extra to gain from also rescaling.
+    """
+
+    def __init__(self, dim, momentum=0.1):
+        super().__init__()
+        self.momentum = momentum
+        self.register_buffer('running_mean', torch.zeros(dim))
+
+    def update(self, x):
+        """Nudges running_mean toward this batch's mean. Call only on the larger, more
+        representative stream (LiftedTokenPredictor's per-token query x, not its much smaller
+        per-candidate prototype batch) so the estimate isn't skewed by a small sample."""
+        if self.training:
+            with torch.no_grad():
+                batch_mean = x.detach().reshape(-1, x.shape[-1]).mean(dim=0)
+                self.running_mean.mul_(1 - self.momentum).add_(batch_mean, alpha=self.momentum)
+
+    def forward(self, x):
+        return x - self.running_mean
+
+
 class LiftedTokenPredictor(nn.Module):
     """Predictor: like PrototypePredictor, but scores candidates against each concept's own top-k
     positive/negative lifted tokens (babysteerling.data.babyatlas.compute_lifted_tokens) instead
@@ -295,7 +333,11 @@ class LiftedTokenPredictor(nn.Module):
         self.register_buffer('proto_token_ids', proto_token_ids, persistent=False)
 
         self.register_buffer('value', torch.tensor([-1.] * top_k + [1.] * top_k), persistent=False)
-        self.proto_query = nn.Linear(d, d, bias=False)
+        # bias gives proto_query some capacity to cancel a shared, roughly token-independent
+        # offset in x/hidden on its own; _RunningCenter (see class above forward()) is the
+        # primary fix, tracking that offset directly instead of waiting for gradient to find it
+        self.proto_query = nn.Linear(d, d, bias=True)
+        self.center = _RunningCenter(d)
         # cosine similarity between unit vectors concentrates tightly around 0 in high dimensions
         # (std ~= 1/sqrt(d)), so softmax over raw cosine sims is nearly uniform regardless of how
         # well-matched a candidate actually is. A learned temperature (CLIP's logit_scale trick)
@@ -327,7 +369,9 @@ class LiftedTokenPredictor(nn.Module):
         # from both its "query" and "key" role every step, reinforcing growth along its own
         # dominant direction. Cosine similarity removes that degree of freedom: only the angle
         # between x and h matters, not how large proto_query's weights have grown.
-        key_selected = F.normalize(self.proto_query(hidden), dim=-1)  # shape: [U, 2, top_k, H]
+        # self.center strips a shared offset before normalizing (see _RunningCenter) -- applied
+        # to both x and hidden identically, since they're compared in the same space
+        key_selected = F.normalize(self.center(self.proto_query(hidden)), dim=-1)  # shape: [U, 2, top_k, H]
 
         if x.device.type == 'mps':
             # see PrototypePredictor.forward: MPS crashes when this gather's backward scatters
@@ -343,7 +387,9 @@ class LiftedTokenPredictor(nn.Module):
             key_cand = key_selected[inverse]  # shape: [B, T, C, 2, top_k, H]
             valid_cand = valid_selected[inverse]  # shape: [B, T, C, 2, top_k]
 
-        q = F.normalize(self.proto_query(x), dim=-1)  # shape: [B, T, H]
+        q_raw = self.proto_query(x)  # shape: [B, T, H]
+        self.center.update(q_raw)  # x is the larger, more representative stream -- see update()
+        q = F.normalize(self.center(q_raw), dim=-1)  # shape: [B, T, H]
         raw = torch.einsum('bth,btcgkh->btcgk', q, key_cand)  # [B, T, C, 2, top_k], cosine similarity in [-1, 1]
         # clamp the log-value, not exp()'s result: exp() overflows to inf before a post-hoc clamp
         # could catch it, and inf's gradient combined with clamp's zero-grad region there
