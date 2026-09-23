@@ -7,3 +7,4 @@ wandb_name: deep_head
 head:
   type: mlp
   tie_weights: false
+  mlp_hidden: 300

@@ -22,7 +22,7 @@ from torch.nn import functional as F
 
 from .nn.backbone import TransformerModel
 from .nn.bottleneck import ConceptBottleneck
-from .nn.predictor import LinearEmbeddingToConcept, ReluEmbeddingToConcepts
+from .nn.predictor import LinearEmbeddingToConcept, ReluEmbeddingToConcepts, LinearMemoryPredictor
 
 
 class BaseLM(nn.Module):
@@ -42,6 +42,8 @@ class BaseLM(nn.Module):
                  dropout, interpretable=True, n_concepts=None, unknown_ratio=3, p_epsilon=0.1,
                  unknown_rank=None, top_k_known=None, top_k_unknown=None, head_type="linear",
                  tie_weights=True, head_mlp_hidden=None,
+                 memory_embedding_dims=None, memory_size=None, warmup_steps=200,
+                 init_temperature=1.0, final_temperature=0.1,
                  known_encoder_type="dense", proto_token_ids=None, topk_axis=5, chunk_size=4096,
                  known_key_dim=None, use_checkpoint=True, candidates_per_token=25,
                  predictor_type="prototype", lifted_top_k=5):
@@ -69,6 +71,15 @@ class BaseLM(nn.Module):
         elif head_type == "mlp":
             self.head = ReluEmbeddingToConcepts(
                 n_embed, vocab_size, mlp_hidden=head_mlp_hidden,
+            )
+        elif head_type == "memory":
+            self.head = LinearMemoryPredictor(
+                n_embed, vocab_size,
+                memory_embedding_dims=memory_embedding_dims,
+                memory_size=memory_size,
+                warmup_steps=warmup_steps,
+                init_temperature=init_temperature,
+                final_temperature=final_temperature,
             )
 
         attn_mask = None
@@ -196,6 +207,8 @@ class Diffusion(BaseLM):
 def build_model(vocab_size, n_concepts, block_size, n_embed=128, num_heads=4, num_kv_heads=2,
                  n_layers=4, dropout=0.2, unknown_ratio=3, p_epsilon=0.1, unknown_rank=None,
                  top_k_known=None, top_k_unknown=None, head_type="linear", tie_weights=True,
+                 memory_embedding_dims=None, memory_size=None, warmup_steps=200,
+                 init_temperature=1.0, final_temperature=0.1,
                  head_mlp_hidden=None, backbone_type="causal", diff_block_len=None, interpretable=True,
                  known_encoder_type="dense", proto_token_ids=None, topk_axis=5, chunk_size=4096,
                  known_key_dim=None, use_checkpoint=True, candidates_per_token=25,
@@ -234,6 +247,11 @@ def build_model(vocab_size, n_concepts, block_size, n_embed=128, num_heads=4, nu
         top_k_unknown=top_k_unknown,
         head_type=head_type,
         tie_weights=tie_weights,
+        memory_embedding_dims=memory_embedding_dims,
+        memory_size=memory_size,
+        warmup_steps=warmup_steps,
+        init_temperature=init_temperature,
+        final_temperature=final_temperature,
         head_mlp_hidden=head_mlp_hidden,
         known_encoder_type=known_encoder_type,
         proto_token_ids=proto_token_ids,

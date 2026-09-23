@@ -1,3 +1,5 @@
+import math
+
 import torch
 from torch import nn
 from torch_concepts.nn import BaseConceptLayer
@@ -90,3 +92,108 @@ class ReluEmbeddingToConcepts(LinearEmbeddingToConcept):
             else:
                 summed, k, u, e = layer(summed), layer(k), layer(u), layer(e)
         return k, u, e
+
+
+class LinearMemoryPredictor(BaseConceptLayer):
+    def __init__(self, in_embeddings, out_concepts,
+                 memory_embedding_dims=30, memory_size=5,
+                 warmup_steps=200,
+                 init_temperature=5.0, final_temperature=0.01,
+                 anneal_steps=10_000, grad_clip_norm=1.0):
+
+        super().__init__(
+            in_embeddings=in_embeddings,
+            out_concepts=out_concepts,
+            in_concepts=None
+        )
+        d = self.in_embeddings_shape
+        vocab_size = self.out_concepts_shape
+        self.memory_embedding_dims = memory_embedding_dims
+        self.memory_size = memory_size
+        self.init_temperature = init_temperature
+        self.final_temperature = final_temperature
+        self.anneal_steps = anneal_steps
+        self.warmup_steps = warmup_steps
+        self.grad_clip_norm = grad_clip_norm
+        self.head_type = "memory"
+
+        self._selector_out_shape = (vocab_size, memory_size)
+        self._selector_output_dim = torch.tensor(self._selector_out_shape).prod().item()
+
+        self.memory = nn.Embedding(memory_size, d*vocab_size)
+        self._init_memory_weight()
+        self.selector = nn.Linear(in_embeddings, memory_size)
+
+        self.register_buffer('_step', torch.tensor(0, dtype=torch.long))  # saved/restored with state_dict
+
+        if grad_clip_norm is not None:
+            self._register_grad_clip_hooks(grad_clip_norm)
+
+    def _register_grad_clip_hooks(self, max_norm):
+        def _clip(grad):
+            if not torch.isfinite(grad).all():
+                return torch.zeros_like(grad)  # skip updating this param this step
+            norm = grad.norm()
+            return grad * (max_norm / (norm + 1e-6)) if norm > max_norm else grad
+
+        self.memory.weight.register_hook(_clip)
+        for p in self.selector.parameters():
+            p.register_hook(_clip)
+
+    @property
+    def selection_temperature(self):
+        effective_step = max(0, self._step.item() - self.warmup_steps)
+        progress = min(1.0, effective_step / self.anneal_steps)
+        # log-space interpolation: equal steps feel more even, since softmax's
+        # sensitivity to temperature is highly nonlinear near the low end
+        log_t = math.log(self.init_temperature) * (1 - progress) + math.log(self.final_temperature) * progress
+        return math.exp(log_t)
+
+    def _init_memory_weight(self):
+        with torch.no_grad():
+            w = self.memory.weight.view(self.memory_size, self.in_embeddings_shape, self.out_concepts_shape)
+            for m in range(self.memory_size):
+                nn.init.kaiming_uniform_(w[m], a=math.sqrt(5))  # matches nn.Linear default, per-slot
+
+    def emb_to_mixing_probabilities(self, embeddings, advance_step=None):
+        if advance_step is None:
+            advance_step = self.training  # forward() path: advances by default
+        mixing_logits = self.selector(embeddings).float().clamp(-30, 30)
+        temp = self.selection_temperature
+        if self.training:
+            mixing_probs = torch.softmax(mixing_logits / temp, dim=-1)
+            if advance_step:
+                self._step += 1
+        else:
+            mixing_probs = torch.nn.functional.gumbel_softmax(mixing_logits, tau=temp, hard=False, dim=-1)
+        return mixing_probs.to(embeddings.dtype)
+
+    def mixing(self, x, mixing_probs):
+        memory_weight = self.memory.weight.view(
+            self.memory_size, self.in_embeddings_shape, self.out_concepts_shape
+        )
+
+        # memory-efficient path from before: never materializes [B,T,d,V]
+        per_slot = torch.einsum('btd,mdv->btmv', x, memory_weight)
+        return torch.einsum('btm,btmv->btv', mixing_probs, per_slot)
+
+    def forward(self, embeddings):
+        mixing_probs = self.emb_to_mixing_probabilities(embeddings)
+        return self.mixing(embeddings, mixing_probs).clamp(-30, 30)
+
+    def decompose(self, k, u, epsilon):
+        """
+        Exact decomposition of vocab_logits(k+u+epsilon) into three additive
+        terms, using a single shared set of mixing weights.
+        `embeddings` defaults to k+u+epsilon (i.e. the weights are derived
+        from the true full embeddings) — override if you want the mixing
+        computed from something else.
+        """
+        embeddings = k + u + epsilon
+        mixing_probs = self.emb_to_mixing_probabilities(embeddings, advance_step=False)
+
+        logits_k = self.mixing(k, mixing_probs)
+        logits_u = self.mixing(u, mixing_probs)
+        logits_eps = self.mixing(epsilon, mixing_probs)
+
+        return logits_k, logits_u, logits_eps

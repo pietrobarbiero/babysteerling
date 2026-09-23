@@ -41,3 +41,9 @@ max_prototype_tokens: 32
 # instead -- see configs/model/linear_selector_lifted_tokens.yaml). See nn.prototype.
 predictor_type: prototype
 lifted_top_k: 5  # predictor_type=lifted_tokens only: how many positive/negative lifted tokens per concept
+
+# memory head
+memory_embedding_dims: 8
+memory_size: 3
+init_temperature: 5.0
+final_temperature: 0.1

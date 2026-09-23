@@ -1,0 +1,15 @@
+# swap the linear head with a ReLU DNN
+defaults:
+  - base
+  - _self_
+
+wandb_name: memory_head
+head:
+  type: memory
+
+# memory head
+unknown_ratio: 1
+memory_embedding_dims: 512
+memory_size: 3
+init_temperature: 5.0
+final_temperature: 0.1
