@@ -14,6 +14,7 @@ Used by babysteerling.steering as the token-level attribution signal: a token in
 already tagged with concept c counts as "attributed" to c if it's one of c's lifted tokens.
 Built entirely from data the pipeline already produces, no new LLM-tagging stage needed.
 """
+
 import json
 import math
 import os
@@ -44,8 +45,15 @@ def _log_likelihood_ratio(count, concept_total, corpus_count, total_tokens):
     return 2 * (term(a, e_a) + term(b, e_b) + term(c, e_c) + term(d, e_d))
 
 
-def compute_lifted_tokens(tokens_path, doc_records_path, output_path=None, top_k=50, min_support=5,
-                           metric="log_likelihood", direction="positive"):
+def compute_lifted_tokens(
+    tokens_path,
+    doc_records_path,
+    output_path=None,
+    top_k=50,
+    min_support=5,
+    metric="log_likelihood",
+    direction="positive",
+):
     """Ranks vocabulary tokens per concept by `metric` (see module docstring): "lift" (Section
     4.4's original P(w|c)/P(w) ratio) or "log_likelihood" (default -- Dunning's log-likelihood
     ratio, robust to the small-sample noise raw lift is prone to).
@@ -71,26 +79,34 @@ def compute_lifted_tokens(tokens_path, doc_records_path, output_path=None, top_k
     Idempotent: if output_path exists, loads and returns it instead of recomputing.
     """
     if metric not in ("lift", "log_likelihood"):
-        raise ValueError(f"unknown metric {metric!r}, expected 'lift' or 'log_likelihood'")
+        raise ValueError(
+            f"unknown metric {metric!r}, expected 'lift' or 'log_likelihood'"
+        )
     if direction not in ("positive", "negative"):
-        raise ValueError(f"unknown direction {direction!r}, expected 'positive' or 'negative'")
+        raise ValueError(
+            f"unknown direction {direction!r}, expected 'positive' or 'negative'"
+        )
 
     if output_path and os.path.exists(output_path):
         print(f"Found existing {output_path}, skipping lifted-token computation.")
-        with open(output_path, 'r', encoding='utf-8') as f:
+        with open(output_path, "r", encoding="utf-8") as f:
             return {int(k): v for k, v in json.load(f).items()}
 
     tokens = torch.load(tokens_path)
     doc_records = torch.load(doc_records_path)
 
-    corpus_counts = Counter()   # token_id -> count across the whole corpus
-    concept_counts = {}         # concept_id -> Counter(token_id -> count within that concept's documents)
+    corpus_counts = Counter()  # token_id -> count across the whole corpus
+    concept_counts = (
+        {}
+    )  # concept_id -> Counter(token_id -> count within that concept's documents)
     total_tokens = len(tokens)
 
     for doc in doc_records:
-        doc_tokens = tokens[doc['start']:doc['end']].tolist()  # this document's own token ids
+        doc_tokens = tokens[
+            doc["start"] : doc["end"]
+        ].tolist()  # this document's own token ids
         corpus_counts.update(doc_tokens)
-        for concept_id in doc['concept_ids']:
+        for concept_id in doc["concept_ids"]:
             concept_counts.setdefault(concept_id, Counter()).update(doc_tokens)
 
     lifted_tokens = {}
@@ -114,15 +130,19 @@ def compute_lifted_tokens(tokens_path, doc_records_path, output_path=None, top_k
                 score = lift if direction == "positive" else -lift
             else:
                 # magnitude only, no sign -- direction is already enforced by the lift gate above
-                score = _log_likelihood_ratio(count, concept_total, corpus_counts[token_id], total_tokens)
+                score = _log_likelihood_ratio(
+                    count, concept_total, corpus_counts[token_id], total_tokens
+                )
             scored.append((score, token_id))
         scored.sort(reverse=True)  # highest score first
         lifted_tokens[concept_id] = [token_id for _, token_id in scored[:top_k]]
 
     if output_path:
         os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
-        with open(output_path, 'w', encoding='utf-8') as f:
-            json.dump({str(k): v for k, v in lifted_tokens.items()}, f, indent=2)  # JSON keys must be strings
+        with open(output_path, "w", encoding="utf-8") as f:
+            json.dump(
+                {str(k): v for k, v in lifted_tokens.items()}, f, indent=2
+            )  # JSON keys must be strings
         print(f"Wrote lifted tokens for {len(lifted_tokens)} concepts to {output_path}")
 
     return lifted_tokens

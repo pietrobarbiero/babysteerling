@@ -13,11 +13,19 @@ class TokenAccuracy(Metric):
         self.ignore_index = ignore_index
 
         # Register state variables for proper batch accumulation and DDP reduction
-        self.add_state("correct", default=torch.tensor(0, dtype=torch.long), dist_reduce_fx="sum")
-        self.add_state("total", default=torch.tensor(0, dtype=torch.long), dist_reduce_fx="sum")
+        self.add_state(
+            "correct", default=torch.tensor(0, dtype=torch.long), dist_reduce_fx="sum"
+        )
+        self.add_state(
+            "total", default=torch.tensor(0, dtype=torch.long), dist_reduce_fx="sum"
+        )
 
     def update(self, output: InferenceOutput, batch: dict):
-        logits = output.logits.get("next_token") if isinstance(output.logits, dict) else output.logits
+        logits = (
+            output.logits.get("next_token")
+            if isinstance(output.logits, dict)
+            else output.logits
+        )
         if logits is None:
             return
 
@@ -59,8 +67,12 @@ class ConceptAUC(Metric):
     def _lazy_init(self, num_concepts: int, device: torch.device):
         """Initializes state and metrics once num_concepts is known at runtime."""
         self.num_concepts = num_concepts
-        self.auroc_metric = MultilabelAUROC(num_labels=num_concepts, average=None).to(device)
-        self.ap_metric = MultilabelAveragePrecision(num_labels=num_concepts, average=None).to(device)
+        self.auroc_metric = MultilabelAUROC(num_labels=num_concepts, average=None).to(
+            device
+        )
+        self.ap_metric = MultilabelAveragePrecision(
+            num_labels=num_concepts, average=None
+        ).to(device)
 
     def reset(self):
         self.all_preds = []
@@ -94,7 +106,9 @@ class ConceptAUC(Metric):
             # P(any) = 1 - exp(log_p_none)
             p_any = -torch.expm1(log_p_none)  # shape: [n]
 
-            targets = torch.zeros(self.num_concepts, dtype=torch.long, device=p_any.device)
+            targets = torch.zeros(
+                self.num_concepts, dtype=torch.long, device=p_any.device
+            )
             if len(concept_ids) > 0:
                 targets[concept_ids] = 1
 
@@ -105,7 +119,7 @@ class ConceptAUC(Metric):
         if not self.all_preds:
             return {"macro_roc_auc": 0.0, "macro_pr_auc": 0.0}
 
-        preds = torch.stack(self.all_preds)      # shape: [num_docs, num_concepts]
+        preds = torch.stack(self.all_preds)  # shape: [num_docs, num_concepts]
         targets = torch.stack(self.all_targets)  # shape: [num_docs, num_concepts]
 
         # Per-concept AUCs (shape: [num_concepts])

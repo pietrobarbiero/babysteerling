@@ -105,7 +105,9 @@ class CompositeLoss(nn.Module):
 
                 metrics_dict[f"{name}_loss"] = loss_val.detach().item()
                 if weight != 1.0:
-                    metrics_dict[f"{name}_loss_weighted"] = (weight * loss_val).detach().item()
+                    metrics_dict[f"{name}_loss_weighted"] = (
+                        (weight * loss_val).detach().item()
+                    )
 
         metrics_dict["total_loss"] = total_loss.detach().item()
 
@@ -227,7 +229,7 @@ class ConceptLoss(nn.Module, Loss):
             # log_p_none = -F.softplus(z_span).sum(dim=0)  # shape: [n]
             doc_len = z_span.shape[0]
             # Scaling softplus sum by length (or sqrt(length)) prevents long spans from dominating
-            log_p_none = -F.softplus(z_span).sum(dim=0) / (doc_len ** 0.5)
+            log_p_none = -F.softplus(z_span).sum(dim=0) / (doc_len**0.5)
 
             # Ensure log_p_none is strictly negative (<= -1e-7) so exp(log_p_none) < 1.0,
             # preventing log1p(-1.0) = log(0)
@@ -243,21 +245,31 @@ class ConceptLoss(nn.Module, Loss):
             # # BCE loss: -(y * log_p_any + (1 - y) * log_p_none)
             # doc_loss = -(y * log_p_any + (1 - y) * log_p_none).mean()
 
-            pos_mask = (y == 1.0)
-            neg_mask = (y == 0.0)
+            pos_mask = y == 1.0
+            neg_mask = y == 0.0
 
             # Average per positive concept
-            pos_loss = -log_p_any[pos_mask].mean() if pos_mask.any() else logits.new_tensor(0.0)
+            pos_loss = (
+                -log_p_any[pos_mask].mean()
+                if pos_mask.any()
+                else logits.new_tensor(0.0)
+            )
 
             # Average per negative concept
-            neg_loss = -log_p_none[neg_mask].mean() if neg_mask.any() else logits.new_tensor(0.0)
+            neg_loss = (
+                -log_p_none[neg_mask].mean()
+                if neg_mask.any()
+                else logits.new_tensor(0.0)
+            )
 
             # Each group contributes equally (1:1 weight) regardless of how sparse y is
             doc_loss = pos_loss + neg_loss
 
             total = total + doc_loss
 
-        return total / len(doc_spans)  # average per-document loss, so batch size doesn't change the scale
+        return total / len(
+            doc_spans
+        )  # average per-document loss, so batch size doesn't change the scale
 
 
 class DiffusionConceptLoss(nn.Module, Loss):
@@ -272,7 +284,9 @@ class DiffusionConceptLoss(nn.Module, Loss):
         doc_spans = batch.get("doc_spans", [])
 
         if logits is None or not doc_spans or mask is None or mask.sum() == 0:
-            return torch.tensor(0.0, device=logits.device if logits is not None else torch.device("cpu"))
+            return torch.tensor(
+                0.0, device=logits.device if logits is not None else torch.device("cpu")
+            )
 
         n = logits.shape[-1]
         total = logits.new_zeros(())
@@ -293,35 +307,49 @@ class DiffusionConceptLoss(nn.Module, Loss):
             # Scaling by sqrt(n_masked) prevents spans with many masked positions from
             # dominating, mirroring ConceptLoss's length normalization.
             n_masked = z_span.shape[0]
-            log_p_none = -F.softplus(z_span).sum(dim=0) / (n_masked ** 0.5)
+            log_p_none = -F.softplus(z_span).sum(dim=0) / (n_masked**0.5)
             log_p_none_safe = log_p_none.clamp(max=-1e-7)
             log_p_any = torch.log1p(-torch.exp(log_p_none_safe))
 
             y = logits.new_zeros(n)
             y[concept_ids] = 1.0
 
-            pos_mask = (y == 1.0)
-            neg_mask = (y == 0.0)
+            pos_mask = y == 1.0
+            neg_mask = y == 0.0
 
-            pos_loss = -log_p_any[pos_mask].mean() if pos_mask.any() else logits.new_tensor(0.0)
-            neg_loss = -log_p_none[neg_mask].mean() if neg_mask.any() else logits.new_tensor(0.0)
+            pos_loss = (
+                -log_p_any[pos_mask].mean()
+                if pos_mask.any()
+                else logits.new_tensor(0.0)
+            )
+            neg_loss = (
+                -log_p_none[neg_mask].mean()
+                if neg_mask.any()
+                else logits.new_tensor(0.0)
+            )
 
             total = total + (pos_loss + neg_loss)
             valid_spans += 1
 
         return total / max(valid_spans, 1)
 
+
 # Losses for unknown/residual models
+
 
 class ReconstructionLoss(nn.Module, Loss):
     """MSE between residual representation and target."""
 
-    def forward(self, output: dict[str, InferenceOutput], batch: dict = None) -> torch.Tensor:
+    def forward(
+        self, output: dict[str, InferenceOutput], batch: dict = None
+    ) -> torch.Tensor:
         u = output["unknown_out"].value["unknown_embedding"]
         if u is None:
             return torch.tensor(0.0, device=output["unknown_out"].value.device)
 
-        u_target = output["unknown_target_embeddings_out"].value["unknown_target_embedding"]
+        u_target = output["unknown_target_embeddings_out"].value[
+            "unknown_target_embedding"
+        ]
         if u_target is None:
             return torch.tensor(0.0, device=output["unknown_out"].value.device)
 
@@ -331,7 +359,10 @@ class ReconstructionLoss(nn.Module, Loss):
         if output["unknown_out"].mask.sum() == 0:
             return torch.tensor(0.0, device=u.device)
 
-        return ((u[output["unknown_out"].mask] - u_target[output["unknown_out"].mask]) ** 2).mean()
+        return (
+            (u[output["unknown_out"].mask] - u_target[output["unknown_out"].mask]) ** 2
+        ).mean()
+
 
 class IndependenceLoss(nn.Module, Loss):
     """Penalizes correlation between k and u, so the unknown head doesn't just re-learn
@@ -342,9 +373,13 @@ class IndependenceLoss(nn.Module, Loss):
     labels.
     """
 
-    MAX_VALUE = 1.0  # ceiling, so a single large-covariance batch can't dominate the total loss
+    MAX_VALUE = (
+        1.0  # ceiling, so a single large-covariance batch can't dominate the total loss
+    )
 
-    def forward(self, output: dict[str, InferenceOutput], batch: dict = None) -> torch.Tensor:
+    def forward(
+        self, output: dict[str, InferenceOutput], batch: dict = None
+    ) -> torch.Tensor:
         k = output["known_out"].value["known_embedding"]
         if k is None:
             return torch.tensor(0.0, device=output["known_out"].value.device)
@@ -355,19 +390,27 @@ class IndependenceLoss(nn.Module, Loss):
             return torch.tensor(0.0, device=output["known_out"].value.device)
 
         d = k.shape[-1]
-        Hk = k.detach().reshape(-1, d)  # shape: [B, T, d] -> [B*T, d], flatten batch+time into one axis of "samples"
+        Hk = k.detach().reshape(
+            -1, d
+        )  # shape: [B, T, d] -> [B*T, d], flatten batch+time into one axis of "samples"
         Hu = u.reshape(-1, d)  # shape: [B, T, d] -> [B*T, d]
         num_tokens = Hk.shape[0]
 
-
-        Phi = Hk - Hk.mean(dim=0, keepdim=True)  # shape: [B*T, d], center each feature across the batch
+        Phi = Hk - Hk.mean(
+            dim=0, keepdim=True
+        )  # shape: [B*T, d], center each feature across the batch
         Psi = Hu - Hu.mean(dim=0, keepdim=True)  # shape: [B*T, d]
-        cross_cov = Psi.t() @ Phi  # shape: [d, B*T] @ [B*T, d] -> [d, d], empirical cross-covariance matrix
-        hsic = (cross_cov ** 2).sum() / (d ** 2 * max(num_tokens - 1, 1))  # normalized Frobenius norm^2
+        cross_cov = (
+            Psi.t() @ Phi
+        )  # shape: [d, B*T] @ [B*T, d] -> [d, d], empirical cross-covariance matrix
+        hsic = (cross_cov**2).sum() / (
+            d**2 * max(num_tokens - 1, 1)
+        )  # normalized Frobenius norm^2
         return hsic.clamp(max=self.MAX_VALUE)
 
 
 # Losses for interventions
+
 
 class RespondLoss(nn.Module, Loss):
     """Eq. 31: Pushes the injected concept's activation alpha_c toward 1
@@ -394,7 +437,9 @@ class RespondLoss(nn.Module, Loss):
 
         B, T, n = logits.shape
         idx = concept_ids.reshape(B, 1, 1).expand(B, T, 1).long()  # shape: [B, T, 1]
-        z_c = logits.gather(-1, idx).squeeze(-1)  # shape: [B, T], each row's own intervened concept logit
+        z_c = logits.gather(-1, idx).squeeze(
+            -1
+        )  # shape: [B, T], each row's own intervened concept logit
 
         return F.softplus(-z_c[position_mask]).mean()
 
@@ -425,5 +470,7 @@ class ExpressLoss(nn.Module, Loss):
             return torch.tensor(0.0, device=logits.device)
 
         probs = F.softmax(logits, dim=-1)  # shape: [B, T, vocab]
-        mass = torch.take_along_dim(probs, lifted_token_ids.long(), dim=-1).sum(dim=-1)  # shape: [B, T]
+        mass = torch.take_along_dim(probs, lifted_token_ids.long(), dim=-1).sum(
+            dim=-1
+        )  # shape: [B, T]
         return -torch.log(mass[position_mask].clamp(self.eps, 1.0)).mean()

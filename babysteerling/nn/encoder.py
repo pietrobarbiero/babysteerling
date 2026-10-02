@@ -15,9 +15,13 @@ def sparsify_top_k(activations, k):
     """
     if k is None or k >= activations.shape[-1]:
         return activations
-    top_vals, top_idx = torch.topk(activations, k, dim=-1)  # shape: [..., n] -> [..., k] (values and their indices)
+    top_vals, top_idx = torch.topk(
+        activations, k, dim=-1
+    )  # shape: [..., n] -> [..., k] (values and their indices)
     sparse = torch.zeros_like(activations)
-    sparse.scatter_(-1, top_idx, top_vals)  # write the top-k values back into their original positions, rest stay 0
+    sparse.scatter_(
+        -1, top_idx, top_vals
+    )  # write the top-k values back into their original positions, rest stay 0
     return sparse
 
 
@@ -96,8 +100,12 @@ class ResidualModule(nn.Module):
     def forward(self, epsilon):
         # epsilon = h - k - u  # shape: [B, T, d], same shape as h
         if self.training and self.p_epsilon > 0:
-            keep = (torch.rand(epsilon.shape[0], 1, 1, device=epsilon.device)
-                    >= self.p_epsilon).to(epsilon.dtype)  # shape: [B, 1, 1], one draw per sequence
+            keep = (
+                torch.rand(epsilon.shape[0], 1, 1, device=epsilon.device)
+                >= self.p_epsilon
+            ).to(
+                epsilon.dtype
+            )  # shape: [B, 1, 1], one draw per sequence
             epsilon = epsilon * keep
         return epsilon
 

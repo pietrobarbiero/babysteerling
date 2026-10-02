@@ -20,13 +20,18 @@ Override any hyperparameter:  python build_dataset.py atlas.num_documents=2000 a
 Build a different corpus:     python build_dataset.py corpus=my_corpus
 (see README.md for the full explanation of config overrides, unions, and multirun)
 """
+
 import os
 
 import hydra
 from omegaconf import DictConfig, OmegaConf
 
 from babysteerling.data.babyatlas import (
-    assign_concepts, build_concept_prototypes, build_concepts, compute_lifted_tokens, tag_chunks,
+    assign_concepts,
+    build_concept_prototypes,
+    build_concepts,
+    compute_lifted_tokens,
+    tag_chunks,
     tokenize_dataset,
 )
 from babysteerling.data.prepare import download_corpus, train_tokenizer
@@ -46,7 +51,9 @@ def main(cfg: DictConfig):
     tokens_path = os.path.join(a.output_dir, "steerling_tokens.pt")
     doc_records_path = os.path.join(a.output_dir, "steerling_concepts.pt")
     lifted_tokens_path = os.path.join(a.output_dir, "lifted_tokens.json")
-    lifted_tokens_negative_path = os.path.join(a.output_dir, "lifted_tokens_negative.json")
+    lifted_tokens_negative_path = os.path.join(
+        a.output_dir, "lifted_tokens_negative.json"
+    )
     prototypes_path = os.path.join(a.output_dir, "concept_prototypes.json")
 
     # per source: download raw text, then LLM-tag it independently
@@ -58,26 +65,42 @@ def main(cfg: DictConfig):
 
         tags_path = os.path.join(a.output_dir, f"tags_{source.name}.jsonl")
         tag_chunks(
-            input_path=input_path, output_path=tags_path, num_documents=a.num_documents,
-            document_delimiter=source.document_delimiter, prompt_template=a.tag_prompt_template,
-            model_name=a.tagging_model, batch_size=a.tagging_batch_size,
-            max_new_tokens=a.tagging_max_new_tokens, seed=a.seed,
+            input_path=input_path,
+            output_path=tags_path,
+            num_documents=a.num_documents,
+            document_delimiter=source.document_delimiter,
+            prompt_template=a.tag_prompt_template,
+            model_name=a.tagging_model,
+            batch_size=a.tagging_batch_size,
+            max_new_tokens=a.tagging_max_new_tokens,
+            seed=a.seed,
         )
         tags_paths.append(tags_path)
 
     # one shared tokenizer across every source, so a union dataset tokenizes consistently.
     # boundary_token is separate from each source's own document_delimiter (see prepare.py)
-    train_tokenizer(input_paths, tokenizer_path, vocab_size=c.tokenizer_vocab_size,
-                     boundary_token=c.boundary_token)
+    train_tokenizer(
+        input_paths,
+        tokenizer_path,
+        vocab_size=c.tokenizer_vocab_size,
+        boundary_token=c.boundary_token,
+    )
 
     # one shared concept library, built from every source's tags combined: this is what makes
     # it a real union, not just concatenated datasets
     combine_jsonl(tags_paths, combined_tags_path)
     build_concepts(
-        tags_path=combined_tags_path, output_path=concepts_path, embed_model_name=a.embed_model,
-        label_model_name=a.tagging_model, k=a.k, min_cluster_size=a.min_cluster_size,
-        tags_per_label_prompt=a.tags_per_label_prompt, dedup_threshold=a.dedup_threshold,
-        batch_size=a.label_batch_size, max_new_tokens=a.label_max_new_tokens, seed=a.seed,
+        tags_path=combined_tags_path,
+        output_path=concepts_path,
+        embed_model_name=a.embed_model,
+        label_model_name=a.tagging_model,
+        k=a.k,
+        min_cluster_size=a.min_cluster_size,
+        tags_per_label_prompt=a.tags_per_label_prompt,
+        dedup_threshold=a.dedup_threshold,
+        batch_size=a.label_batch_size,
+        max_new_tokens=a.label_max_new_tokens,
+        seed=a.seed,
         label_prompt_template=a.label_prompt_template,
     )
 
@@ -86,28 +109,41 @@ def main(cfg: DictConfig):
     # on assignment/tokenization
     if a.enable_prototypes:
         build_concept_prototypes(
-            concepts_path=concepts_path, output_path=prototypes_path, n_proto=a.n_proto,
-            embed_model_name=a.embed_model, generation_model_name=a.tagging_model,
-            batch_size=a.prototype_batch_size, max_new_tokens=a.prototype_max_new_tokens,
+            concepts_path=concepts_path,
+            output_path=prototypes_path,
+            n_proto=a.n_proto,
+            embed_model_name=a.embed_model,
+            generation_model_name=a.tagging_model,
+            batch_size=a.prototype_batch_size,
+            max_new_tokens=a.prototype_max_new_tokens,
             prompt_templates=OmegaConf.to_container(a.prototype_prompt_templates),
         )
 
     # per source: assign against the shared library, then merge into one training set
     chunk_concepts_paths = []
     for source, tags_path, input_path in zip(c.sources, tags_paths, input_paths):
-        chunk_concepts_path = os.path.join(a.output_dir, f"chunk_concepts_{source.name}.jsonl")
+        chunk_concepts_path = os.path.join(
+            a.output_dir, f"chunk_concepts_{source.name}.jsonl"
+        )
         assign_concepts(
-            tags_path=tags_path, concepts_path=concepts_path, output_path=chunk_concepts_path,
-            input_path=input_path, document_delimiter=source.document_delimiter,
-            enable_scale_up=a.enable_scale_up, num_scaleup_documents=a.num_scaleup_documents,
-            similarity_floor=a.similarity_floor, embed_model_name=a.embed_model,
+            tags_path=tags_path,
+            concepts_path=concepts_path,
+            output_path=chunk_concepts_path,
+            input_path=input_path,
+            document_delimiter=source.document_delimiter,
+            enable_scale_up=a.enable_scale_up,
+            num_scaleup_documents=a.num_scaleup_documents,
+            similarity_floor=a.similarity_floor,
+            embed_model_name=a.embed_model,
         )
         chunk_concepts_paths.append(chunk_concepts_path)
 
     combine_jsonl(chunk_concepts_paths, combined_chunk_concepts_path)
     tokenize_dataset(
-        chunk_concepts_path=combined_chunk_concepts_path, tokenizer_path=tokenizer_path,
-        tokens_output_path=tokens_path, concepts_output_path=doc_records_path,
+        chunk_concepts_path=combined_chunk_concepts_path,
+        tokenizer_path=tokenizer_path,
+        tokens_output_path=tokens_path,
+        concepts_output_path=doc_records_path,
         boundary_token=c.boundary_token,
     )
 
@@ -116,19 +152,29 @@ def main(cfg: DictConfig):
     # negative (under-represented) associations are saved to separate files -- steering only
     # consumes the positive one today, the negative file is for inspection/analysis.
     compute_lifted_tokens(
-        tokens_path=tokens_path, doc_records_path=doc_records_path, output_path=lifted_tokens_path,
-        top_k=a.lifted_top_k, min_support=a.lifted_min_support, metric=a.lifted_metric,
+        tokens_path=tokens_path,
+        doc_records_path=doc_records_path,
+        output_path=lifted_tokens_path,
+        top_k=a.lifted_top_k,
+        min_support=a.lifted_min_support,
+        metric=a.lifted_metric,
         direction="positive",
     )
     compute_lifted_tokens(
-        tokens_path=tokens_path, doc_records_path=doc_records_path, output_path=lifted_tokens_negative_path,
-        top_k=a.lifted_top_k, min_support=a.lifted_min_support, metric=a.lifted_metric,
+        tokens_path=tokens_path,
+        doc_records_path=doc_records_path,
+        output_path=lifted_tokens_negative_path,
+        top_k=a.lifted_top_k,
+        min_support=a.lifted_min_support,
+        metric=a.lifted_metric,
         direction="negative",
     )
 
     source_names = ", ".join(s.name for s in c.sources)
-    print(f"\nDataset build complete in {a.output_dir!r} from source(s): {source_names}. "
-          f"Train on it with: python train.py data.data_dir={a.output_dir}")
+    print(
+        f"\nDataset build complete in {a.output_dir!r} from source(s): {source_names}. "
+        f"Train on it with: python train.py data.data_dir={a.output_dir}"
+    )
 
 
 if __name__ == "__main__":

@@ -25,10 +25,19 @@ def main(cfg: DictConfig):
     torch.manual_seed(cfg.seed)
 
     # 1. Device resolution
-    device = 'cuda' if torch.cuda.is_available() else ('mps' if torch.backends.mps.is_available() else 'cpu')
-    if device == 'mps' and getattr(cfg.model, "known_encoder_type", None) == "product_key":
-        print("known_encoder_type='product_key': forcing device='cpu' (MPS crash fix needs small Kt)")
-        device = 'cpu'
+    device = (
+        "cuda"
+        if torch.cuda.is_available()
+        else ("mps" if torch.backends.mps.is_available() else "cpu")
+    )
+    if (
+        device == "mps"
+        and getattr(cfg.model, "known_encoder_type", None) == "product_key"
+    ):
+        print(
+            "known_encoder_type='product_key': forcing device='cpu' (MPS crash fix needs small Kt)"
+        )
+        device = "cpu"
 
     # 2. Setup logging and checkpointing
     # Compute a hash of the config (excluding wandb) to uniquely identify this run's configuration
@@ -62,7 +71,7 @@ def main(cfg: DictConfig):
         num_workers=cfg.data.num_workers,
         min_lifted_tokens=cfg.data.min_lifted_tokens,
         pin_memory=cfg.data.pin_memory,
-        train_val_split=cfg.data.train_val_split
+        train_val_split=cfg.data.train_val_split,
     )
     dm.setup("fit")
 
@@ -75,7 +84,7 @@ def main(cfg: DictConfig):
         "loss_fn": loss_fn,
         "inference": DeterministicInference,
         # the following are used only by some model types and ignored by others
-        "out_concepts": [c['label'] for c in dm.concepts],
+        "out_concepts": [c["label"] for c in dm.concepts],
         "mask_token_id": mask_token_id,
         "steering_every_n_steps": cfg.steering.every_n_steps,
         "inj_layer": cfg.steering.inj_layer,
@@ -111,21 +120,21 @@ def main(cfg: DictConfig):
         check_val_every_n_epoch=cfg.training.check_val_every_n_epoch,
         limit_val_batches=cfg.training.limit_val_batches,
         logger=wandb_logger,
-        callbacks=[
-            TQDMProgressBar(refresh_rate=1),
-            checkpoint_callback,
-            gen_logger
-        ],
+        callbacks=[TQDMProgressBar(refresh_rate=1), checkpoint_callback, gen_logger],
     )
 
     # 7. Start Training
     try:
         if ckpt_exists:
             if cfg.training.resume_from_checkpoint:
-                print(f"\n[Resumption] Found existing checkpoint for hash '{config_hash}'. Resuming from: {resume_ckpt_path}\n")
+                print(
+                    f"\n[Resumption] Found existing checkpoint for hash '{config_hash}'. Resuming from: {resume_ckpt_path}\n"
+                )
                 trainer.fit(model=pl_model, datamodule=dm, ckpt_path=resume_ckpt_path)
         else:
-            print(f"\n[Fresh Run] No checkpoint found for hash '{config_hash}'. Starting new run...\n")
+            print(
+                f"\n[Fresh Run] No checkpoint found for hash '{config_hash}'. Starting new run...\n"
+            )
             trainer.fit(model=pl_model, datamodule=dm)
         print("\nTrainer execution finished successfully!")
     finally:

@@ -5,6 +5,7 @@ Plain functions, no torch Dataset/DataLoader: a batch is a set of random token w
 standard nanoGPT loader), plus a lookup for which documents overlap each window. That lookup
 doesn't fit a map-style Dataset well, so plain functions are simpler here.
 """
+
 import bisect
 import json
 import os
@@ -27,15 +28,17 @@ def combine_jsonl(input_paths, output_path):
         return
     next_chunk_id = 0
     os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
-    with open(output_path, 'w', encoding='utf-8') as out_f:
+    with open(output_path, "w", encoding="utf-8") as out_f:
         for input_path in input_paths:
-            with open(input_path, 'r', encoding='utf-8') as in_f:
+            with open(input_path, "r", encoding="utf-8") as in_f:
                 for line in in_f:
                     row = json.loads(line)
-                    row['chunk_id'] = next_chunk_id
+                    row["chunk_id"] = next_chunk_id
                     out_f.write(json.dumps(row) + "\n")
                     next_chunk_id += 1
-    print(f"Combined {len(input_paths)} file(s) into {output_path} ({next_chunk_id} rows).")
+    print(
+        f"Combined {len(input_paths)} file(s) into {output_path} ({next_chunk_id} rows)."
+    )
 
 
 def load_tokenizer(data_dir, filename="tokenizer.json"):
@@ -56,7 +59,9 @@ def load_dataset(data_dir):
     n_concepts: size of the known-concept library, used to size the bottleneck's known head and
         the label tensors build_supervision() builds.
     """
-    tokens = torch.load(os.path.join(data_dir, "steerling_tokens.pt"))  # shape: [N_total_tokens]
+    tokens = torch.load(
+        os.path.join(data_dir, "steerling_tokens.pt")
+    )  # shape: [N_total_tokens]
     doc_records = torch.load(os.path.join(data_dir, "steerling_concepts.pt"))
     with open(os.path.join(data_dir, "concepts.json")) as f:
         concept_library = json.load(f)
@@ -64,7 +69,9 @@ def load_dataset(data_dir):
     return tokens, doc_records, n_concepts
 
 
-def filter_concepts_by_lifted_tokens(data_dir, doc_records, n_concepts, min_lifted_tokens=5):
+def filter_concepts_by_lifted_tokens(
+    data_dir, doc_records, n_concepts, min_lifted_tokens=5
+):
     """Drops concepts with fewer than min_lifted_tokens lifted tokens (not enough token-level
     signal for Section 4.4's lift metric to mean anything -- not worth a prototype or a slot in
     the model), renumbering the survivors contiguously. Call this explicitly, right after
@@ -93,35 +100,51 @@ def filter_concepts_by_lifted_tokens(data_dir, doc_records, n_concepts, min_lift
         concept_library = json.load(f)
     lifted_tokens = load_lifted_tokens(data_dir, "positive")
     if not lifted_tokens:
-        concepts = [{**c, 'orig_concept_id': c['concept_id']} for c in concept_library]
+        concepts = [{**c, "orig_concept_id": c["concept_id"]} for c in concept_library]
         return doc_records, n_concepts, concepts
 
-    keep = [c for c in concept_library if len(lifted_tokens.get(c['concept_id'], [])) >= min_lifted_tokens]
+    keep = [
+        c
+        for c in concept_library
+        if len(lifted_tokens.get(c["concept_id"], [])) >= min_lifted_tokens
+    ]
     if len(keep) < len(concept_library):
-        print(f"Dropping {len(concept_library) - len(keep)} concept(s) with fewer than "
-              f"{min_lifted_tokens} lifted tokens ({len(keep)}/{len(concept_library)} remain).")
+        print(
+            f"Dropping {len(concept_library) - len(keep)} concept(s) with fewer than "
+            f"{min_lifted_tokens} lifted tokens ({len(keep)}/{len(concept_library)} remain)."
+        )
 
     concepts = []
     old_to_new = {}
     for new_id, c in enumerate(keep):
-        old_to_new[c['concept_id']] = new_id
+        old_to_new[c["concept_id"]] = new_id
         c = dict(c)
-        c['orig_concept_id'] = c['concept_id']
-        c['concept_id'] = new_id
+        c["orig_concept_id"] = c["concept_id"]
+        c["concept_id"] = new_id
         concepts.append(c)
 
     doc_records = [
-        {**doc, 'concept_ids': [old_to_new[c] for c in doc['concept_ids'] if c in old_to_new]}
+        {
+            **doc,
+            "concept_ids": [
+                old_to_new[c] for c in doc["concept_ids"] if c in old_to_new
+            ],
+        }
         for doc in doc_records
     ]
     return doc_records, len(concepts), concepts, lifted_tokens
 
 
-PROTOTYPE_VALUE_ORDER = ("negative", "unrelated", "positive")  # matches a fixed -1/0/+1 activation axis
+PROTOTYPE_VALUE_ORDER = (
+    "negative",
+    "unrelated",
+    "positive",
+)  # matches a fixed -1/0/+1 activation axis
 
 
-def load_concept_prototype_tokens(data_dir, tokenizer, concept_ids, filename="concept_prototypes.json",
-                                   max_tokens=32):
+def load_concept_prototype_tokens(
+    data_dir, tokenizer, concept_ids, filename="concept_prototypes.json", max_tokens=32
+):
     """Loads per-concept prototype texts (babysteerling.data.babyatlas.build_concept_prototypes)
     and tokenizes them with the corpus's own BPE tokenizer.
 
@@ -144,7 +167,7 @@ def load_concept_prototype_tokens(data_dir, tokenizer, concept_ids, filename="co
     path = os.path.join(data_dir, filename)
     if not os.path.exists(path):
         return None
-    with open(path, 'r', encoding='utf-8') as f:
+    with open(path, "r", encoding="utf-8") as f:
         by_concept = {int(k): v for k, v in json.load(f).items()}
 
     per_type = len(next(iter(by_concept.values()))[PROTOTYPE_VALUE_ORDER[0]])
@@ -155,10 +178,12 @@ def load_concept_prototype_tokens(data_dir, tokenizer, concept_ids, filename="co
         for ptype in PROTOTYPE_VALUE_ORDER:
             items = by_type.get(ptype) or [{"text": ""}] * per_type
             for item in items:
-                all_ids.append(tokenizer.encode(item['text']).ids[:max_tokens])
+                all_ids.append(tokenizer.encode(item["text"]).ids[:max_tokens])
 
     Tp = max((len(ids) for ids in all_ids), default=1) or 1
-    padded = torch.tensor([ids + [0] * (Tp - len(ids)) for ids in all_ids], dtype=torch.int32)
+    padded = torch.tensor(
+        [ids + [0] * (Tp - len(ids)) for ids in all_ids], dtype=torch.int32
+    )
     return padded.view(len(concept_ids), len(PROTOTYPE_VALUE_ORDER), per_type, Tp)
 
 
@@ -169,7 +194,9 @@ def load_lifted_tokens(data_dir, direction):
     that don't need steering never have to check.
     """
     if direction not in ("positive", "negative"):
-        raise ValueError(f"direction must be 'positive' or 'negative', got {direction!r}")
+        raise ValueError(
+            f"direction must be 'positive' or 'negative', got {direction!r}"
+        )
 
     if direction == "positive":
         path = os.path.join(data_dir, "lifted_tokens.json")
@@ -178,11 +205,14 @@ def load_lifted_tokens(data_dir, direction):
 
     if not os.path.exists(path):
         return {}
-    with open(path, 'r', encoding='utf-8') as f:
+    with open(path, "r", encoding="utf-8") as f:
         return {int(k): v for k, v in json.load(f).items()}
 
 
-LIFTED_VALUE_ORDER = ("negative", "positive")  # matches a fixed -1/+1 activation axis, no "unrelated"
+LIFTED_VALUE_ORDER = (
+    "negative",
+    "positive",
+)  # matches a fixed -1/+1 activation axis, no "unrelated"
 
 
 def load_lifted_token_prototypes(data_dir, concept_ids, top_k=5):
@@ -220,7 +250,9 @@ def load_lifted_token_prototypes(data_dir, concept_ids, top_k=5):
             rows.append(ids + [-1] * (top_k - len(ids)))
 
     n = len(concept_ids)
-    tensor = torch.tensor(rows, dtype=torch.long).view(len(LIFTED_VALUE_ORDER), n, top_k)
+    tensor = torch.tensor(rows, dtype=torch.long).view(
+        len(LIFTED_VALUE_ORDER), n, top_k
+    )
     return tensor.permute(1, 0, 2).contiguous()  # [n, 2, top_k]
 
 
@@ -237,10 +269,14 @@ def overlapping_docs(doc_records, doc_starts, window_start, window_end):
     # first candidate document: the last one starting at or before window_start
     i = max(bisect.bisect_right(doc_starts, window_start) - 1, 0)
     spans = []
-    while i < len(doc_records) and doc_records[i]['start'] < window_end:
+    while i < len(doc_records) and doc_records[i]["start"] < window_end:
         d = doc_records[i]
-        s, e = max(d['start'], window_start), min(d['end'], window_end)  # intersect with window
+        s, e = max(d["start"], window_start), min(
+            d["end"], window_end
+        )  # intersect with window
         if e > s:
-            spans.append((s - window_start, e - window_start, d['concept_ids']))  # -> window-local offsets
+            spans.append(
+                (s - window_start, e - window_start, d["concept_ids"])
+            )  # -> window-local offsets
         i += 1
     return spans

@@ -26,15 +26,27 @@ class ALM(LM):
         dropout: float,
         loss_fn: nn.Module,
         inference: Type[BaseInference],
-
         tie_weights: bool = True,
-
         inference_kwargs: dict | None = None,
-        **kwargs
+        **kwargs,
     ):
-        super().__init__(vocab_size, block_size, n_embed, num_heads, num_kv_heads, n_layers, dropout, loss_fn, **kwargs)
+        super().__init__(
+            vocab_size,
+            block_size,
+            n_embed,
+            num_heads,
+            num_kv_heads,
+            n_layers,
+            dropout,
+            loss_fn,
+            **kwargs,
+        )
         self.tie_weights = tie_weights
-        tied_embedding = self.tokens_to_embedding.token_embedding_table.weight if tie_weights else None
+        tied_embedding = (
+            self.tokens_to_embedding.token_embedding_table.weight
+            if tie_weights
+            else None
+        )
         self._head = LinearEmbeddingToConcept(
             self.n_embed,
             self.vocab_size,
@@ -42,12 +54,21 @@ class ALM(LM):
             tied_embedding=tied_embedding,
         )
 
-        self.next_token = ConceptVariable("next_token", distribution=OneHotCategorical, size=1, members=[f"token_{i}" for i in range(vocab_size)])
-        self.head_cpd = ParametricCPD(self.next_token, parametrization={"logits": self._head}, parents=[self.latent_var])
+        self.next_token = ConceptVariable(
+            "next_token",
+            distribution=OneHotCategorical,
+            size=1,
+            members=[f"token_{i}" for i in range(vocab_size)],
+        )
+        self.head_cpd = ParametricCPD(
+            self.next_token,
+            parametrization={"logits": self._head},
+            parents=[self.latent_var],
+        )
 
         self.pgm = BayesianNetwork(
             [self.input_var, self.latent_var, self.next_token],
-            [self.input_cpd, self.latent_cpd, self.head_cpd]
+            [self.input_cpd, self.latent_cpd, self.head_cpd],
         )
         self.inference = inference(self.pgm, **(inference_kwargs or {}))
 
@@ -82,10 +103,14 @@ class ALM(LM):
         was_training = self.training
         self.eval()
 
-        idx = torch.zeros((batch_size, 2), dtype=torch.long, device=device) if prompt is None else prompt.to(device)
+        idx = (
+            torch.zeros((batch_size, 2), dtype=torch.long, device=device)
+            if prompt is None
+            else prompt.to(device)
+        )
 
         for _ in range(max_new_tokens):
-            idx_cond = idx[:, -self.block_size:]
+            idx_cond = idx[:, -self.block_size :]
             x = self.tokens_to_embedding(idx_cond)
             out = self.inference.query(query=["next_token"], evidence={"input": x})
             logits = out.logits["next_token"][:, -1, :] / temperature

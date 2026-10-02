@@ -84,7 +84,9 @@ class LightningLM(pl.LightningModule):
 
     def on_validation_epoch_end(self) -> None:
         """Computes and logs accumulated epoch-level evaluation metrics (e.g., ConceptAUC)."""
-        if hasattr(self.model, "loss_fn") and hasattr(self.model.loss_fn, "compute_metrics"):
+        if hasattr(self.model, "loss_fn") and hasattr(
+            self.model.loss_fn, "compute_metrics"
+        ):
             eval_metrics = self.model.loss_fn.compute_metrics()
             for metric_name, metric_val in eval_metrics.items():
                 self.log(
@@ -122,9 +124,7 @@ class LightningLM(pl.LightningModule):
             {"params": nodecay_params, "weight_decay": 0.0},
         ]
 
-        optimizer = AdamW(
-            optim_groups, lr=self.hparams.lr, betas=self.hparams.betas
-        )
+        optimizer = AdamW(optim_groups, lr=self.hparams.lr, betas=self.hparams.betas)
 
         # Cosine learning rate scheduler with linear warmup
         def lr_lambda(current_step: int) -> float:

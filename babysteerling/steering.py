@@ -18,7 +18,9 @@ def _flatten_to_2d(x):
     if x.dim() == 3:
         B, T, F_ = x.shape
         return x.reshape(B * T, F_), (B, T, F_)
-    raise ValueError(f"expected a 2-D [B,F] or 3-D [B,T,F] tensor, got shape {tuple(x.shape)}")
+    raise ValueError(
+        f"expected a 2-D [B,F] or 3-D [B,T,F] tensor, got shape {tuple(x.shape)}"
+    )
 
 
 def _unflatten(x, original_shape):
@@ -35,7 +37,9 @@ class AddDirectionStrategy(ConceptInterventionStrategy):
 
     def __init__(self, direction, gamma):
         super().__init__()
-        self.register_buffer('direction', direction.detach())  # buffer, so it moves with .to(device)
+        self.register_buffer(
+            "direction", direction.detach()
+        )  # buffer, so it moves with .to(device)
         self.gamma = gamma
 
     def forward(self, x, *args, **kwargs):
@@ -50,8 +54,15 @@ class InterventionModule(nn.Module):
     build_mask(), and flattens back. Works with any of their (or our) Strategy/Policy classes.
     """
 
-    def __init__(self, original_module, intervention_strategy, intervention_policy,
-                 sel_idx=None, quantile=1.0, eps=1e-12):
+    def __init__(
+        self,
+        original_module,
+        intervention_strategy,
+        intervention_policy,
+        sel_idx=None,
+        quantile=1.0,
+        eps=1e-12,
+    ):
         super().__init__()
         self.original_module = original_module
         self.intervention_strategy = intervention_strategy
@@ -68,8 +79,13 @@ class InterventionModule(nn.Module):
         # build_mask() uses torch.kthvalue, which MPS doesn't support, so run it on CPU and
         # move the result back. Cheap either way, since policy_scores is only [rows, F].
         mask = self.intervention_policy.build_mask(
-            policy_scores.cpu(), sel_idx=self.sel_idx, quantile=self.quantile, eps=self.eps,
-        ).to(device=flat.device, dtype=flat.dtype)  # 1 = keep original, 0 = replace (pytorch_concepts' convention)
+            policy_scores.cpu(),
+            sel_idx=self.sel_idx,
+            quantile=self.quantile,
+            eps=self.eps,
+        ).to(
+            device=flat.device, dtype=flat.dtype
+        )  # 1 = keep original, 0 = replace (pytorch_concepts' convention)
         intervened = self.intervention_strategy(flat)
 
         result = flat * mask + intervened * (1.0 - mask)
@@ -106,6 +122,7 @@ def injected_at(model, direction, gamma, position_mask, inj_layer):
     already known, so no Policy is needed to choose them. Uses a plain forward hook instead of
     InterventionModule, since there's no strategy/policy choice to make here.
     """
+
     def hook(module, inputs, output):
         # These blocks are shared with prototype-based known encoders (nn.prototype.
         # PrototypePredictor), which re-enter them mid-forward to encode prototype texts at a
@@ -114,7 +131,10 @@ def injected_at(model, direction, gamma, position_mask, inj_layer):
             return output
         return inject_at_positions(output, direction, gamma, position_mask)
 
-    handles = [block.register_forward_hook(hook) for block in list(model.backbone.blocks)[inj_layer:]]
+    handles = [
+        block.register_forward_hook(hook)
+        for block in list(model.backbone.blocks)[inj_layer:]
+    ]
     try:
         yield model
     finally:
@@ -143,12 +163,18 @@ def calibrate_gamma(direction, head, tau=4.0):
     per-row [B, D] batch of directions -- e.g. one concept per window (returns a [B] tensor).
     """
     if head.head_type != "linear":
-        raise ValueError("calibrate_gamma requires head_type='linear' (Eq. 19 assumes a linear LM head)")
+        raise ValueError(
+            "calibrate_gamma requires head_type='linear' (Eq. 19 assumes a linear LM head)"
+        )
     if direction.dim() == 1:
-        alignment = head.head.weight @ direction  # shape: [vocab, D] @ [D] -> [vocab], e_c . W_y for every y
+        alignment = (
+            head.head.weight @ direction
+        )  # shape: [vocab, D] @ [D] -> [vocab], e_c . W_y for every y
         peak = alignment.max().item()
         return tau / peak
-    alignment = direction @ head.head.weight.T  # shape: [B, D] @ [D, vocab] -> [B, vocab]
+    alignment = (
+        direction @ head.head.weight.T
+    )  # shape: [B, D] @ [D, vocab] -> [B, vocab]
     peak = alignment.max(dim=-1).values  # shape: [B]
     return tau / peak.clamp(min=1e-6)
 
@@ -202,7 +228,14 @@ def sample_steering_target(doc_spans, lifted_tokens):
     target, a different question than a Policy answers (it picks positions within an
     already-chosen target).
     """
-    candidates = sorted({c for _, _, concept_ids in doc_spans for c in concept_ids if lifted_tokens.get(c)})
+    candidates = sorted(
+        {
+            c
+            for _, _, concept_ids in doc_spans
+            for c in concept_ids
+            if lifted_tokens.get(c)
+        }
+    )
     if not candidates:
         return None
     return random.choice(candidates)

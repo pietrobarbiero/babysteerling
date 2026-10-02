@@ -3,11 +3,18 @@ import torch
 
 def build_block_causal_mask(block_size, diff_block_len, device=None):
     """Attention mask: bidirectional inside each block of `diff_block_len` tokens, causal across
-    blocks (paper Figure 16d). Built once when SteerlingGPT is constructed, reused every step."""
-    assert block_size % diff_block_len == 0, "block_size must be divisible by diff_block_len"
-    block_ids = torch.arange(block_size, device=device) // diff_block_len  # shape: [block_size], each position's block index
+    blocks (paper Figure 16d). Built once when SteerlingGPT is constructed, reused every step.
+    """
+    assert (
+        block_size % diff_block_len == 0
+    ), "block_size must be divisible by diff_block_len"
+    block_ids = (
+        torch.arange(block_size, device=device) // diff_block_len
+    )  # shape: [block_size], each position's block index
     # mask[i, j] True means query i may attend to key j: allowed iff j's block <= i's block
-    mask = block_ids.unsqueeze(1) >= block_ids.unsqueeze(0)  # shape: [block_size] -> [block_size, block_size]
+    mask = block_ids.unsqueeze(1) >= block_ids.unsqueeze(
+        0
+    )  # shape: [block_size] -> [block_size, block_size]
     return mask
 
 
@@ -33,13 +40,21 @@ def corrupt(x0, mask_token_id, diff_block_len):
     predict, and p_mask to weight them.
     """
     B, T = x0.shape
-    assert T % diff_block_len == 0, "sequence length must be divisible by the diffusion block length"
+    assert (
+        T % diff_block_len == 0
+    ), "sequence length must be divisible by the diffusion block length"
     num_blocks = T // diff_block_len
 
-    t = sample_noise_levels(B * num_blocks, x0.device).view(B, num_blocks)  # shape: [B*num_blocks] -> [B, num_blocks]
-    t_per_token = t.repeat_interleave(diff_block_len, dim=1)  # shape: [B, num_blocks] -> [B, T], broadcast each block's t to its tokens
+    t = sample_noise_levels(B * num_blocks, x0.device).view(
+        B, num_blocks
+    )  # shape: [B*num_blocks] -> [B, num_blocks]
+    t_per_token = t.repeat_interleave(
+        diff_block_len, dim=1
+    )  # shape: [B, num_blocks] -> [B, T], broadcast each block's t to its tokens
 
-    mask = torch.rand(B, T, device=x0.device) < t_per_token  # shape: [B, T], True where this token gets masked
+    mask = (
+        torch.rand(B, T, device=x0.device) < t_per_token
+    )  # shape: [B, T], True where this token gets masked
     x_t = x0.clone()
     x_t[mask] = mask_token_id
     return x_t, mask, t_per_token

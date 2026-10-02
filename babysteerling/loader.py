@@ -52,7 +52,9 @@ class ConceptDataset(Dataset):
 
         # 2. Per-window binary search for document spans & dense multi-hot labels
         doc_spans = []
-        known_labels = torch.zeros(self.block_size, self.n_concepts, dtype=torch.float32)
+        known_labels = torch.zeros(
+            self.block_size, self.n_concepts, dtype=torch.float32
+        )
 
         for tok_start, tok_end, concept_ids in overlapping_docs(
             self.doc_records, self.doc_starts, window_start, window_end
@@ -71,16 +73,22 @@ class ConceptDataset(Dataset):
         lifted = torch.as_tensor(list(self.lifted_tokens), device=x.device)
         position_mask = doc_mask & torch.isin(x, lifted)
 
-        lifted_tokens_intervention_id = self.lifted_tokens.get(random_intervention_id, [])
+        lifted_tokens_intervention_id = self.lifted_tokens.get(
+            random_intervention_id, []
+        )
 
         return {
             "input_ids": x,
             "targets": y,
             "doc_spans": doc_spans,
             "known_labels": known_labels,
-            "random_intervention_id": torch.IntTensor([random_intervention_id]).unsqueeze(0),
+            "random_intervention_id": torch.IntTensor(
+                [random_intervention_id]
+            ).unsqueeze(0),
             "position_mask": position_mask,
-            "lifted_tokens_intervention_id": torch.IntTensor([lifted_tokens_intervention_id]),
+            "lifted_tokens_intervention_id": torch.IntTensor(
+                [lifted_tokens_intervention_id]
+            ),
         }
 
 
@@ -89,9 +97,13 @@ def concept_collate_fn(batch: list[dict]) -> dict:
     input_ids = torch.stack([item["input_ids"] for item in batch])
     targets = torch.stack([item["targets"] for item in batch])
     known_labels = torch.stack([item["known_labels"] for item in batch])
-    random_intervention_ids = torch.stack([torch.tensor(item["random_intervention_id"]) for item in batch])
+    random_intervention_ids = torch.stack(
+        [torch.tensor(item["random_intervention_id"]) for item in batch]
+    )
     position_mask = torch.stack([item["position_mask"] for item in batch])
-    lifted_tokens_intervention_ids = torch.stack([item["lifted_tokens_intervention_id"] for item in batch])
+    lifted_tokens_intervention_ids = torch.stack(
+        [item["lifted_tokens_intervention_id"] for item in batch]
+    )
 
     # Merge per-window doc_spans, adding the batch index b to each tuple
     batch_doc_spans = []
@@ -100,10 +112,10 @@ def concept_collate_fn(batch: list[dict]) -> dict:
             batch_doc_spans.append((b, tok_start, tok_end, concept_ids))
 
     return {
-        "input_ids": input_ids,       # [B, block_size]
-        "targets": targets,           # [B, block_size]
-        "known_labels": known_labels, # [B, block_size, n_concepts]
-        "doc_spans": batch_doc_spans, # list of (b, tok_start, tok_end, concept_ids)
+        "input_ids": input_ids,  # [B, block_size]
+        "targets": targets,  # [B, block_size]
+        "known_labels": known_labels,  # [B, block_size, n_concepts]
+        "doc_spans": batch_doc_spans,  # list of (b, tok_start, tok_end, concept_ids)
         "random_intervention_ids": random_intervention_ids,  # [B]
         "position_mask": position_mask,  # [B, block_size]
         "lifted_tokens_intervention_ids": lifted_tokens_intervention_ids,  # [B, lifted_tokens_of_intervened_concept]
@@ -133,7 +145,7 @@ class ConceptDataModule(pl.LightningDataModule):
         # State set during setup()
         self.n_concepts: int | None = None
         self.concepts: list[dict] | None = None
-        self.lifted_tokens:  dict | dict[int, Any] | None = None
+        self.lifted_tokens: dict | dict[int, Any] | None = None
         self.train_dataset: ConceptDataset | None = None
         self.val_dataset: ConceptDataset | None = None
 

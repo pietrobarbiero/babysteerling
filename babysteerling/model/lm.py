@@ -38,13 +38,19 @@ class LM(nn.Module, ABC):
         self.loss_fn = loss_fn
 
         self.tokens_to_embedding = TokensToEmbeddings(vocab_size, n_embed, block_size)
-        self.backbone = TransformerModel(n_embed, block_size, num_heads, n_layers, dropout, num_kv_heads, attn_mask)
+        self.backbone = TransformerModel(
+            n_embed, block_size, num_heads, n_layers, dropout, num_kv_heads, attn_mask
+        )
 
         self.input_var = EmbeddingVariable("input", distribution=Delta, size=n_embed)
         self.latent_var = EmbeddingVariable("latent", distribution=Delta, size=n_embed)
 
-        self.input_cpd = ParametricCPD(self.input_var, parametrization=Identity(), parents=[])
-        self.latent_cpd = ParametricCPD(self.latent_var, parametrization=self.backbone, parents=[self.input_var])
+        self.input_cpd = ParametricCPD(
+            self.input_var, parametrization=Identity(), parents=[]
+        )
+        self.latent_cpd = ParametricCPD(
+            self.latent_var, parametrization=self.backbone, parents=[self.input_var]
+        )
 
     @property
     @abstractmethod
@@ -54,14 +60,12 @@ class LM(nn.Module, ABC):
 
     @abstractmethod
     def step(self, batch: dict, **kwargs) -> LossOutput:
-        """Compute loss and metrics for a batch.
-        """
+        """Compute loss and metrics for a batch."""
         raise NotImplementedError
 
     @abstractmethod
     def generate(self, *args, **kwargs):
-        """Generate a sequence of tokens from the model.
-        """
+        """Generate a sequence of tokens from the model."""
         raise NotImplementedError
 
 

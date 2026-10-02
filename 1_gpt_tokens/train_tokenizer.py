@@ -12,4 +12,6 @@ tokenizer.train(
     special_tokens=["<|endoftext|>"],
 )
 tokenizer.save(save_path)
-print(f"Trained tokenizer with vocab_size={tokenizer.get_vocab_size()}, saved to {save_path}")
+print(
+    f"Trained tokenizer with vocab_size={tokenizer.get_vocab_size()}, saved to {save_path}"
+)

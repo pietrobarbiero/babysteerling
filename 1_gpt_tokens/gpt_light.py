@@ -9,7 +9,11 @@ from download_tinystories import path
 
 torch.manual_seed(1337)
 
-device = 'cuda' if torch.cuda.is_available() else ('mps' if torch.backends.mps.is_available() else 'cpu')
+device = (
+    "cuda"
+    if torch.cuda.is_available()
+    else ("mps" if torch.backends.mps.is_available() else "cpu")
+)
 
 # Params
 batch_size = 64
@@ -40,6 +44,7 @@ tok = Tokenizer.from_file("./data/tinystories_tokenizer.json")
 vocab_size = tok.get_vocab_size()
 decode = lambda ids: tok.decode(ids)
 
+
 def encode(text_str):
     lines = text_str.split("\n")
     encodings = tok.encode_batch(lines)
@@ -51,29 +56,32 @@ def encode(text_str):
             ids.append(eot_id)
     return ids
 
+
 # load / tokenize data, with caching so repeated runs skip re-tokenizing
 if os.path.exists(token_cache_path):
     data = torch.load(token_cache_path)
     print(f"Loaded cached tokens: {len(data)} tokens")
 else:
     print("Tokenizing dataset (first run only)...")
-    with open(path, 'r', encoding='utf-8') as f:
+    with open(path, "r", encoding="utf-8") as f:
         text = f.read()
     data = torch.tensor(encode(text), dtype=torch.long)
     os.makedirs(os.path.dirname(token_cache_path), exist_ok=True)
     torch.save(data, token_cache_path)
     print(f"Tokenized and cached: {len(data)} tokens")
 
-n = int(0.9*len(data))
+n = int(0.9 * len(data))
 train_data = data[:n]
 val_data = data[n:]
 
+
 def get_batch(data):
     ix = torch.randint(len(data) - block_size, (batch_size,))
-    x = torch.stack([data[i:i+block_size] for i in ix])
-    y = torch.stack([data[i+1:i+block_size+1] for i in ix])
+    x = torch.stack([data[i : i + block_size] for i in ix])
+    y = torch.stack([data[i + 1 : i + block_size + 1] for i in ix])
     x, y = x.to(device), y.to(device)
     return x, y
+
 
 def get_lr(step):
     if step < warmup_steps:
@@ -81,11 +89,12 @@ def get_lr(step):
     progress = (step - warmup_steps) / max(1, max_steps - warmup_steps)
     return min_lr + 0.5 * (lr - min_lr) * (1 + math.cos(math.pi * progress))
 
+
 @torch.no_grad()
 def estimate_loss(model, train_data, val_data, eval_epochs):
     out = {}
     model.eval()
-    for split, data in {'train': train_data, 'val': val_data}.items():
+    for split, data in {"train": train_data, "val": val_data}.items():
         losses = torch.zeros(eval_epochs)
         for k in range(eval_epochs):
             x, y = get_batch(data)
@@ -95,9 +104,12 @@ def estimate_loss(model, train_data, val_data, eval_epochs):
     model.train()
     return out
 
+
 class MultiHeadAttention(nn.Module):
 
-    def __init__(self, num_heads, head_size, n_embed, block_size, dropout, num_kv_heads=None):
+    def __init__(
+        self, num_heads, head_size, n_embed, block_size, dropout, num_kv_heads=None
+    ):
         super().__init__()
         self.num_heads = num_heads
         self.head_size = head_size
@@ -123,7 +135,9 @@ class MultiHeadAttention(nn.Module):
         v = v.repeat_interleave(repeat_factor, dim=1)
 
         out = F.scaled_dot_product_attention(
-            q, k, v,
+            q,
+            k,
+            v,
             dropout_p=self.dropout_p if self.training else 0.0,
             is_causal=True,
         )
@@ -156,7 +170,14 @@ class Block(nn.Module):
     def __init__(self, n_embed, block_size, num_heads, dropout, num_kv_heads):
         super().__init__()
         head_size = n_embed // num_heads
-        self.sa_head = MultiHeadAttention(num_heads, head_size, n_embed, block_size, dropout, num_kv_heads=num_kv_heads)
+        self.sa_head = MultiHeadAttention(
+            num_heads,
+            head_size,
+            n_embed,
+            block_size,
+            dropout,
+            num_kv_heads=num_kv_heads,
+        )
         self.ffwd = FeedForward(n_embed, dropout)
         self.ln1 = nn.LayerNorm(n_embed)
         self.ln2 = nn.LayerNorm(n_embed)
@@ -170,13 +191,27 @@ class Block(nn.Module):
 
 
 class TransformerModel(nn.Module):
-    def __init__(self, vocab_size, n_embed, block_size, num_heads, n_layers, dropout, num_kv_heads):
+    def __init__(
+        self,
+        vocab_size,
+        n_embed,
+        block_size,
+        num_heads,
+        n_layers,
+        dropout,
+        num_kv_heads,
+    ):
         super().__init__()
         self.block_size = block_size
         self.n_layers = n_layers
         self.token_embedding_table = nn.Embedding(vocab_size, n_embed)
         self.position_embedding_table = nn.Embedding(block_size, n_embed)
-        self.blocks = nn.Sequential(*[Block(n_embed, block_size, num_heads, dropout, num_kv_heads) for _ in range(n_layers)])
+        self.blocks = nn.Sequential(
+            *[
+                Block(n_embed, block_size, num_heads, dropout, num_kv_heads)
+                for _ in range(n_layers)
+            ]
+        )
         self.ln_f = nn.LayerNorm(n_embed)
         self.lm_head = nn.Linear(n_embed, vocab_size)
 
@@ -184,7 +219,7 @@ class TransformerModel(nn.Module):
 
         self.apply(self._init_weights)
         for name, p in self.named_parameters():
-            if name.endswith('proj.weight') or name.endswith('w3.weight'):
+            if name.endswith("proj.weight") or name.endswith("w3.weight"):
                 nn.init.normal_(p, mean=0.0, std=0.02 / math.sqrt(2 * n_layers))
 
     def _init_weights(self, module):
@@ -209,21 +244,21 @@ class TransformerModel(nn.Module):
             loss = None
         else:
             B, T, C = logits.shape
-            logits = logits.view(B*T, C)
-            targets = targets.view(B*T)
+            logits = logits.view(B * T, C)
+            targets = targets.view(B * T)
             loss = F.cross_entropy(logits, targets)
 
         return logits, loss
 
     def generate(self, idx, max_new_tokens, temperature=1.0, top_k=None):
         for _ in range(max_new_tokens):
-            idx_cond = idx[:, -self.block_size:]
+            idx_cond = idx[:, -self.block_size :]
             logits, loss = self(idx_cond)
             logits = logits[:, -1, :] / temperature
 
             if top_k is not None:
                 v, _ = torch.topk(logits, min(top_k, logits.size(-1)))
-                logits[logits < v[:, [-1]]] = float('-inf')
+                logits[logits < v[:, [-1]]] = float("-inf")
 
             probs = F.softmax(logits, dim=-1)
             idx_next = torch.multinomial(probs, num_samples=1)
@@ -231,10 +266,12 @@ class TransformerModel(nn.Module):
         return idx
 
 
-m = TransformerModel(vocab_size, n_embed, block_size, num_heads, n_layers, dropout, num_kv_heads)
+m = TransformerModel(
+    vocab_size, n_embed, block_size, num_heads, n_layers, dropout, num_kv_heads
+)
 m = m.to(device)
 
-print(sum(p.numel() for p in m.parameters())/1e6, 'M params')
+print(sum(p.numel() for p in m.parameters()) / 1e6, "M params")
 
 if os.path.exists(ckpt_path):
     m.load_state_dict(torch.load(ckpt_path, map_location=device))
@@ -249,7 +286,7 @@ else:
 
         current_lr = get_lr(step)
         for param_group in optimizer.param_groups:
-            param_group['lr'] = current_lr
+            param_group["lr"] = current_lr
 
         logits, loss = m(xb, yb)
 
@@ -260,7 +297,9 @@ else:
 
         if step % eval_interval == 0:
             losses = estimate_loss(m, train_data, val_data, eval_iters)
-            print(f"step {step}, train loss: {losses['train']}, val loss: {losses['val']}, lr: {current_lr:.6f}")
+            print(
+                f"step {step}, train loss: {losses['train']}, val loss: {losses['val']}, lr: {current_lr:.6f}"
+            )
 
     os.makedirs(ckpt_dir, exist_ok=True)
     torch.save(m.state_dict(), ckpt_path)
@@ -268,4 +307,10 @@ else:
 
 # generate a sample
 idx = torch.zeros((1, 1), dtype=torch.long, device=device)
-print(decode(m.generate(idx, max_new_tokens=max_new_tokens, temperature=temperature, top_k=top_k)[0].tolist()))
+print(
+    decode(
+        m.generate(
+            idx, max_new_tokens=max_new_tokens, temperature=temperature, top_k=top_k
+        )[0].tolist()
+    )
+)

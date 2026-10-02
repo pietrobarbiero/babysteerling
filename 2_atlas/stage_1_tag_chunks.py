@@ -9,7 +9,11 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 
 random.seed(1337)
 
-device = 'cuda' if torch.cuda.is_available() else ('mps' if torch.backends.mps.is_available() else 'cpu')
+device = (
+    "cuda"
+    if torch.cuda.is_available()
+    else ("mps" if torch.backends.mps.is_available() else "cpu")
+)
 
 # Params
 NUM_STORIES = 5000
@@ -31,7 +35,7 @@ PROMPT_TEMPLATE = (
 def load_stories(path, n):
     # each story is already delimited by <|endoftext|>, and is short enough to treat
     # as a single chunk (no sentence-splitting/concatenation needed, unlike the paper)
-    with open(path, 'r', encoding='utf-8') as f:
+    with open(path, "r", encoding="utf-8") as f:
         text = f.read()
     stories = [s.strip() for s in text.split("<|endoftext|>")]
     stories = [s for s in stories if s]
@@ -62,10 +66,10 @@ else:
     print(f"Sampled {len(stories)} stories.")
 
     print(f"Loading {MODEL_NAME} on {device}...")
-    dtype = torch.bfloat16 if device in ('cuda', 'mps') else torch.float32
+    dtype = torch.bfloat16 if device in ("cuda", "mps") else torch.float32
     # left padding so every sequence in a batch ends at the same position,
     # letting us slice out just the generated continuation below
-    tok = AutoTokenizer.from_pretrained(MODEL_NAME, padding_side='left')
+    tok = AutoTokenizer.from_pretrained(MODEL_NAME, padding_side="left")
     if tok.pad_token is None:
         tok.pad_token = tok.eos_token
     model = AutoModelForCausalLM.from_pretrained(MODEL_NAME, torch_dtype=dtype)
@@ -74,9 +78,9 @@ else:
 
     num_failed = 0
     os.makedirs(os.path.dirname(tags_path), exist_ok=True)
-    with open(tags_path, 'w', encoding='utf-8') as out_f:
+    with open(tags_path, "w", encoding="utf-8") as out_f:
         for batch_start in range(0, len(stories), BATCH_SIZE):
-            batch = stories[batch_start:batch_start + BATCH_SIZE]
+            batch = stories[batch_start : batch_start + BATCH_SIZE]
             # build one chat-formatted prompt per story, batched for throughput
             prompts = [
                 tok.apply_chat_template(
@@ -86,7 +90,9 @@ else:
                 )
                 for story in batch
             ]
-            inputs = tok(prompts, return_tensors='pt', padding=True, truncation=True).to(device)
+            inputs = tok(
+                prompts, return_tensors="pt", padding=True, truncation=True
+            ).to(device)
 
             with torch.no_grad():
                 output_ids = model.generate(
@@ -97,7 +103,7 @@ else:
                 )
 
             # strip the (left-padded) prompt tokens, keep only the generated continuation
-            new_tokens = output_ids[:, inputs['input_ids'].shape[1]:]
+            new_tokens = output_ids[:, inputs["input_ids"].shape[1] :]
             completions = tok.batch_decode(new_tokens, skip_special_tokens=True)
 
             for i, (story, completion) in enumerate(zip(batch, completions)):
@@ -106,10 +112,17 @@ else:
                     num_failed += 1
                     continue
                 chunk_id = batch_start + i
-                out_f.write(json.dumps({"chunk_id": chunk_id, "text": story, "tags": tags}) + "\n")
+                out_f.write(
+                    json.dumps({"chunk_id": chunk_id, "text": story, "tags": tags})
+                    + "\n"
+                )
 
-            print(f"Tagged {min(batch_start + BATCH_SIZE, len(stories))}/{len(stories)} stories "
-                  f"({num_failed} failed so far)")
+            print(
+                f"Tagged {min(batch_start + BATCH_SIZE, len(stories))}/{len(stories)} stories "
+                f"({num_failed} failed so far)"
+            )
 
-    print(f"Done. {num_failed}/{len(stories)} stories failed to parse and were skipped.")
+    print(
+        f"Done. {num_failed}/{len(stories)} stories failed to parse and were skipped."
+    )
     print(f"Wrote tags to {tags_path}")

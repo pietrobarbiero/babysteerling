@@ -25,7 +25,9 @@ class TextGenerationLogger(Callback):
         sample_text = self.decode_fn(sample_ids)
 
         print("\n" + "=" * 50)
-        print(f"[Fit Complete | Step {trainer.global_step}] Generated Text Sample:\n{sample_text}")
+        print(
+            f"[Fit Complete | Step {trainer.global_step}] Generated Text Sample:\n{sample_text}"
+        )
         print("=" * 50 + "\n")
 
         if trainer.logger and hasattr(trainer.logger, "experiment"):

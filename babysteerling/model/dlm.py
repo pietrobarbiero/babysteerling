@@ -28,36 +28,63 @@ class BlockCausalDLM(DLM):
         dropout: float,
         loss_fn: nn.Module,
         inference: Type[BaseInference],
-
         # diffusion parameters
         mask_token_id: int,
         diff_block_len: int | None = None,
-
         inference_kwargs: dict | None = None,
         tie_weights: bool = True,
         **kwargs,
     ):
 
-        assert diff_block_len is not None, "diff_block_len is required for the diffusion backbone"
+        assert (
+            diff_block_len is not None
+        ), "diff_block_len is required for the diffusion backbone"
         self.diff_block_len = diff_block_len
         self.mask_token_id = mask_token_id
 
         attn_mask = build_block_causal_mask(block_size, diff_block_len)
 
-        super().__init__(vocab_size, block_size, n_embed, num_heads, num_kv_heads, n_layers, dropout, loss_fn, attn_mask, **kwargs)
-
-        self.tie_weights = tie_weights
-        tied_embedding = self.tokens_to_embedding.token_embedding_table.weight if tie_weights else None
-        self._head = LinearEmbeddingToConcept(
-            self.n_embed, self.vocab_size, tie_weights=tie_weights, tied_embedding=tied_embedding,
+        super().__init__(
+            vocab_size,
+            block_size,
+            n_embed,
+            num_heads,
+            num_kv_heads,
+            n_layers,
+            dropout,
+            loss_fn,
+            attn_mask,
+            **kwargs,
         )
 
-        self.next_token = ConceptVariable("next_token", distribution=OneHotCategorical, size=1, members=[f"token_{i}" for i in range(vocab_size)])
-        self.head_cpd = ParametricCPD(self.next_token, parametrization={"logits": self._head}, parents=[self.latent_var])
+        self.tie_weights = tie_weights
+        tied_embedding = (
+            self.tokens_to_embedding.token_embedding_table.weight
+            if tie_weights
+            else None
+        )
+        self._head = LinearEmbeddingToConcept(
+            self.n_embed,
+            self.vocab_size,
+            tie_weights=tie_weights,
+            tied_embedding=tied_embedding,
+        )
+
+        self.next_token = ConceptVariable(
+            "next_token",
+            distribution=OneHotCategorical,
+            size=1,
+            members=[f"token_{i}" for i in range(vocab_size)],
+        )
+        self.head_cpd = ParametricCPD(
+            self.next_token,
+            parametrization={"logits": self._head},
+            parents=[self.latent_var],
+        )
 
         self.pgm = BayesianNetwork(
             [self.input_var, self.latent_var, self.next_token],
-            [self.input_cpd, self.latent_cpd, self.head_cpd]
+            [self.input_cpd, self.latent_cpd, self.head_cpd],
         )
         self.inference = inference(self.pgm, **(inference_kwargs or {}))
 
@@ -71,7 +98,9 @@ class BlockCausalDLM(DLM):
 
     def step(self, batch: dict, *args, **kwargs) -> LossOutput:
         """Diffusive step: executes sequence corruption prior to forward pass."""
-        corrupted_batch, mask, p_mask = diffusion.corrupt(batch["input_ids"], self.mask_token_id, self.diff_block_len)  # x_t, mask, p_mask: [batch_size, block_size]
+        corrupted_batch, mask, p_mask = diffusion.corrupt(
+            batch["input_ids"], self.mask_token_id, self.diff_block_len
+        )  # x_t, mask, p_mask: [batch_size, block_size]
 
         x = self.tokens_to_embedding(corrupted_batch)
 
@@ -104,7 +133,9 @@ class BlockCausalDLM(DLM):
 
         # set seq_len to self.block_size so x matches the 256x256 attention mask shape
         seq_len = self.block_size
-        x = torch.full((batch_size, seq_len), self.mask_token_id, dtype=torch.long, device=device)
+        x = torch.full(
+            (batch_size, seq_len), self.mask_token_id, dtype=torch.long, device=device
+        )
 
         # Clean integer division since seq_len (self.block_size) is guaranteed divisible by diff_block_len
         num_blocks = seq_len // self.diff_block_len
@@ -116,27 +147,39 @@ class BlockCausalDLM(DLM):
 
             step = 0
             while True:
-                still_masked = (x[0, lo:hi] == self.mask_token_id).nonzero(as_tuple=True)[0]
+                still_masked = (x[0, lo:hi] == self.mask_token_id).nonzero(
+                    as_tuple=True
+                )[0]
                 if len(still_masked) == 0:
                     break
 
                 x_emb = self.tokens_to_embedding(x)
-                out = self.inference.query(query=["next_token"], evidence={"input": x_emb})
+                out = self.inference.query(
+                    query=["next_token"], evidence={"input": x_emb}
+                )
                 block_logits = out.logits["next_token"][0, lo:hi] / temperature
                 block_logits[:, self.mask_token_id] = float("-inf")
 
                 probs = F.softmax(block_logits, dim=-1)
                 if top_k is not None:
-                    v, _ = torch.topk(block_logits, min(top_k, block_logits.size(-1)), dim=-1)
-                    probs = torch.where(block_logits < v[:, [-1]], torch.zeros_like(probs), probs)
+                    v, _ = torch.topk(
+                        block_logits, min(top_k, block_logits.size(-1)), dim=-1
+                    )
+                    probs = torch.where(
+                        block_logits < v[:, [-1]], torch.zeros_like(probs), probs
+                    )
                     probs = probs / probs.sum(dim=-1, keepdim=True)
 
                 confidence = probs[still_masked].max(dim=-1).values
-                n_commit = 1 if steps_per_block is None else (
-                    -(-len(still_masked) // max(1, steps_per_block - step))
+                n_commit = (
+                    1
+                    if steps_per_block is None
+                    else (-(-len(still_masked) // max(1, steps_per_block - step)))
                 )
                 pos = still_masked[confidence.topk(n_commit).indices]
-                x[0, lo + pos] = torch.multinomial(probs[pos], num_samples=1).squeeze(-1)
+                x[0, lo + pos] = torch.multinomial(probs[pos], num_samples=1).squeeze(
+                    -1
+                )
                 step += 1
 
         if was_training:
