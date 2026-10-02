@@ -111,17 +111,28 @@ class ConceptBottleneckALM(ALM, ILM):
     def step(self, batch: dict, *args, **kwargs) -> LossOutput:
         x = self.tokens_to_embedding(batch["input_ids"])
 
-        output = self.inference.query(
-            query=["concepts"],
-            evidence={"input": x},
-        )
-        total_loss = self.loss_fn(output, batch, ["concept"], ["concept_auc"])
+        if self.training:
+            output = self.inference.query(
+                query=["concepts"],
+                evidence={"input": x},
+            )
+            total_loss = self.loss_fn(output, batch, ["concept"], ["concept_auc"])
 
-        output = self.inference.query(
-            query=["next_token"],
-            evidence={"concepts": batch["known_labels"]},
-        )
-        total_loss += self.loss_fn(output, batch, ["token"], ["token_accuracy"])
+            # teacher forcing: use known labels to predict next token
+            output = self.inference.query(
+                query=["next_token"],
+                evidence={"concepts": batch["known_labels"]},
+            )
+            total_loss += self.loss_fn(output, batch, ["token"], ["token_accuracy"])
+
+        else:
+            output = self.inference.query(
+                query=["next_token", "concepts"],
+                evidence={"input": x},
+            )
+            total_loss = self.loss_fn(
+                output, batch, ["token", "concept"], ["token_accuracy", "concept_auc"]
+            )
 
         if (
             self.training
