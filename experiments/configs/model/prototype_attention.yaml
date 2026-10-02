@@ -1,8 +1,0 @@
-# Prototype cross-attention known-concept encoder
-# Requires the dataset to have been built with atlas.enable_prototypes=true (concept_prototypes.json).
-defaults:
-  - base
-  - _self_
-
-wandb_name: prototype_attention
-known_encoder_type: prototype_attention

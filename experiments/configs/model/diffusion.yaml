@@ -1,9 +1,0 @@
-# Masked-diffusion backbone, no concept bottleneck: the plain-LM baseline for steerling_diffusion.
-defaults:
-  - base
-  - _self_
-
-wandb_name: diffusion
-interpretable: false
-backbone_type: diffusion
-diff_block_len: 32   # data.block_size must be divisible by this

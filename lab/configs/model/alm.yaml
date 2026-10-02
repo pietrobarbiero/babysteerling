@@ -1,0 +1,5 @@
+defaults:
+  - base
+
+_target_: babysteerling.model.alm.ALM
+wandb_name: "alm-standard"

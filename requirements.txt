@@ -10,3 +10,5 @@ accelerate
 hydra-core
 hydra-joblib-launcher
 wandb
+pytorch-concepts
+pre-commit

@@ -99,6 +99,35 @@ class Block(nn.Module):
         return x
 
 
+class TokensToEmbeddings(nn.Module):
+    """Token and position embeddings, without the transformer stack."""
+
+    def __init__(self, vocab_size, n_embed, block_size):
+        super().__init__()
+        self.vocab_size = vocab_size
+        self.n_embed = n_embed
+        self.block_size = block_size
+        self.token_embedding_table = nn.Embedding(vocab_size, n_embed)
+        self.position_embedding_table = nn.Embedding(block_size, n_embed)
+
+        self.apply(self._init_weights)
+
+    def _init_weights(self, module):
+        if isinstance(module, nn.Linear):
+            nn.init.normal_(module.weight, mean=0.0, std=0.02)
+            if module.bias is not None:
+                nn.init.zeros_(module.bias)
+        elif isinstance(module, nn.Embedding):
+            nn.init.normal_(module.weight, mean=0.0, std=0.02)
+
+    def forward(self, idx):
+        B, T = idx.shape
+        token_emb = self.token_embedding_table(idx)  # shape: [B, T] -> [B, T, n_embed]
+        pos_emb = self.position_embedding_table(torch.arange(T, device=idx.device))  # shape: [T, n_embed]
+        x = token_emb + pos_emb  # broadcast add: [B, T, n_embed] + [T, n_embed] -> [B, T, n_embed]
+        return x
+
+
 class TransformerModel(nn.Module):
     """Backbone only: token and position embeddings through the transformer stack.
 
@@ -106,12 +135,10 @@ class TransformerModel(nn.Module):
     (see ConceptBottleneck), not this raw output.
     """
 
-    def __init__(self, vocab_size, n_embed, block_size, num_heads, n_layers, dropout, num_kv_heads):
+    def __init__(self, n_embed, block_size, num_heads, n_layers, dropout, num_kv_heads, attn_mask=None):
         super().__init__()
         self.block_size = block_size
         self.n_layers = n_layers
-        self.token_embedding_table = nn.Embedding(vocab_size, n_embed)
-        self.position_embedding_table = nn.Embedding(block_size, n_embed)
         # ModuleList (not Sequential) so forward() can pass attn_mask through to every block
         self.blocks = nn.ModuleList([Block(n_embed, num_heads, dropout, num_kv_heads) for _ in range(n_layers)])
         self.ln_f = nn.LayerNorm(n_embed)
@@ -122,6 +149,12 @@ class TransformerModel(nn.Module):
             if name.endswith('proj.weight') or name.endswith('w3.weight'):
                 nn.init.normal_(p, mean=0.0, std=0.02 / math.sqrt(2 * n_layers))
 
+        if attn_mask is not None:
+            # non-persistent: it's cheap to rebuild and shouldn't be saved into/loaded from checkpoints
+            self.register_buffer("_attn_mask", attn_mask, persistent=False)
+        else:
+            self.register_buffer("_attn_mask", None)
+
     def _init_weights(self, module):
         if isinstance(module, nn.Linear):
             nn.init.normal_(module.weight, mean=0.0, std=0.02)
@@ -130,12 +163,8 @@ class TransformerModel(nn.Module):
         elif isinstance(module, nn.Embedding):
             nn.init.normal_(module.weight, mean=0.0, std=0.02)
 
-    def forward(self, idx, attn_mask=None):
-        B, T = idx.shape
-        token_emb = self.token_embedding_table(idx)  # shape: [B, T] -> [B, T, n_embed]
-        pos_emb = self.position_embedding_table(torch.arange(T, device=idx.device))  # shape: [T, n_embed]
-        x = token_emb + pos_emb  # broadcast add: [B, T, n_embed] + [T, n_embed] -> [B, T, n_embed]
+    def forward(self, x):
         for block in self.blocks:
-            x = block(x, attn_mask)
+            x = block(x, self._attn_mask)
         x = self.ln_f(x)
-        return x  # shape: [B, T, n_embed], hidden state ready for the concept bottleneck
+        return x  # shape: [B, T, n_embed]

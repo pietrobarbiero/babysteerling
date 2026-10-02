@@ -114,7 +114,7 @@ def filter_concepts_by_lifted_tokens(data_dir, doc_records, n_concepts, min_lift
         {**doc, 'concept_ids': [old_to_new[c] for c in doc['concept_ids'] if c in old_to_new]}
         for doc in doc_records
     ]
-    return doc_records, len(concepts), concepts
+    return doc_records, len(concepts), concepts, lifted_tokens
 
 
 PROTOTYPE_VALUE_ORDER = ("negative", "unrelated", "positive")  # matches a fixed -1/0/+1 activation axis
@@ -244,38 +244,3 @@ def overlapping_docs(doc_records, doc_starts, window_start, window_end):
             spans.append((s - window_start, e - window_start, d['concept_ids']))  # -> window-local offsets
         i += 1
     return spans
-
-
-def get_batch(tokens, split, block_size, batch_size, n_train, device):
-    """Samples a batch of (input, target) windows for next-token prediction.
-
-    Picks `batch_size` random start offsets, takes `block_size` tokens as x, and the same span
-    shifted one token right as y. `split` restricts which region windows are drawn from, so
-    validation never overlaps training.
-    """
-    lo, hi = (0, n_train) if split == 'train' else (n_train, len(tokens))
-    ix = torch.randint(lo, hi - block_size, (batch_size,))  # shape: [batch_size], window start offsets
-    x = torch.stack([tokens[i:i + block_size] for i in ix])       # shape: [batch_size, block_size]
-    y = torch.stack([tokens[i + 1:i + block_size + 1] for i in ix])  # shape: [batch_size, block_size], shifted by 1
-    x, y = x.to(device), y.to(device)
-    return x, y, ix.tolist()
-
-
-def build_supervision(doc_records, doc_starts, starts, block_size, n_concepts, device):
-    """Builds the concept-loss/reconstruction-loss supervision for a batch of sampled windows.
-
-    Returns:
-      doc_spans: (batch_idx, tok_start, tok_end, concept_ids), one per document overlapping the
-          batch. Consumed by loss.py's ConceptLoss, which aggregates within each document's own
-          span and never merges documents.
-      known_labels: dense multi-hot ground-truth concept labels, broadcast to every token
-          position of the document it belongs to. Used to build the unknown head's
-          reconstruction target.
-    """
-    doc_spans = []
-    known_labels = torch.zeros(len(starts), block_size, n_concepts, device=device)  # shape: [B, T, n_concepts]
-    for b, window_start in enumerate(starts):
-        for tok_start, tok_end, concept_ids in overlapping_docs(doc_records, doc_starts, window_start, window_start + block_size):
-            doc_spans.append((b, tok_start, tok_end, concept_ids))
-            known_labels[b, tok_start:tok_end, concept_ids] = 1.0  # broadcast labels over the doc's token span
-    return doc_spans, known_labels

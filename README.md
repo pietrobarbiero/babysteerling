@@ -1,11 +1,11 @@
-# babysteerling
+# Baby Steerling
 
-A didactic, from scratch build of interpretable language models. It trains on a laptop in a few
-minutes per step.
+A didactic package to develop Interpretable Language Models (ILMs).
+It allows to train ILMs on a laptop in a few minutes per step.
 
-The numbered folders are a step by step build, one file each, meant to be read in order (see
-`CONTRIBUTING.md`). `babysteerling/` and `experiments/` turn that build into a real package and a
-runner around it.
+The numbered folders are a step by step hands-on guide meant to be read in order.
+`babysteerling/` is the main package to develop prototypes, 
+while `lab/` provides a configurable environment for experiments.
 
 - **`0_gpt_chars/`**: A bigram model and a tiny GPT, trained character by character on
   TinyShakespeare. No tokenizer, no interpretability, just next character prediction.
@@ -22,9 +22,8 @@ runner around it.
   `gpt_steerling.py` uses a plain GPT backbone instead, simpler and faster to iterate on.
   `gpt_steerling_deephead.py` and `gpt_steerling_no_supervision.py` are small ablations (a deeper
   head; concept losses turned off).
-- **`babysteerling/`**: The same architecture and Atlas pipeline as a real, installable package
-  (`pip install -e .`). See NOTICE for attribution.
-- **`experiments/`**: A Hydra + Weights & Biases runner for `babysteerling`. Use it to train
+- **`babysteerling/`**: Package to develop prototypes of interpretable language models. See NOTICE for attribution.
+- **`lab/`**: A Hydra + Weights & Biases environment to run experiments. Use it to train
   models, build datasets, log results, and compare runs, including parallel sweeps. See
   `experiments/README.md` for the full how-to.
 
@@ -40,8 +39,8 @@ pip install -e ".[atlas]"            # editable install of babysteerling, needed
 
 ```bash
 cd experiments
-python build_dataset.py   # first time only: downloads TinyStories and builds a concept dataset
-python train.py
+python build_dataset_auto.py   # first time only: downloads TinyStories and builds a concept dataset
+python run_auto.py  # train a default model with default hyperparameters, logs to W&B
 ```
 
 ## License

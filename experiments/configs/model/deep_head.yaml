@@ -1,9 +1,0 @@
-# swap the linear head with a ReLU DNN
-defaults:
-  - base
-  - _self_
-
-wandb_name: deep_head
-head:
-  type: mlp
-  tie_weights: false

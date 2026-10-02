@@ -5,10 +5,10 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "babysteerling"
 version = "0.1.0"
-description = "A small, laptop-trainable implementation of the Steerling concept-bottleneck language model architecture."
+description = "A didactic package to develop Interpretable Language Models (ILMs)."
 readme = "README.md"
 license = { text = "Apache-2.0" }
-authors = [{ name = "Pietro Barbiero", email = "barbiero@tutanota.com" }]
+authors = [{ name = "pyc-team", email = "barbiero@tutanota.com" }]
 requires-python = ">=3.9"
 dependencies = [
     "torch",
@@ -27,7 +27,7 @@ atlas = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/pietrobarbiero/babysteerling"
+Homepage = "https://github.com/pyc-team/babysteerling"
 
 [tool.setuptools.packages.find]
 include = ["babysteerling*"]

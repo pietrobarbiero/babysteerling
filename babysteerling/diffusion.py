@@ -1,13 +1,4 @@
-"""Masked-diffusion training objective for backbone_type="diffusion". Kept out of nn.py/
-training.py so the default causal path stays simple; you can ignore this module entirely if
-you're only using the causal backbone.
-
-Ported from 3_steerling/steerling.py's Causal Diffusion architecture (see NOTICE), as free
-functions over SteerlingGPT's plain forward(idx) interface. This is the only module that needs
-to know about corruption, masking schedules, or denoising sampling.
-"""
 import torch
-from torch.nn import functional as F
 
 
 def build_block_causal_mask(block_size, diff_block_len, device=None):

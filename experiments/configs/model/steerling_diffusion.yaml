@@ -1,8 +1,0 @@
-# Masked-diffusion backbone with the concept bottleneck.
-defaults:
-  - base
-  - _self_
-
-wandb_name: steerling_diffusion
-backbone_type: diffusion
-diff_block_len: 32   # data.block_size must be divisible by this
