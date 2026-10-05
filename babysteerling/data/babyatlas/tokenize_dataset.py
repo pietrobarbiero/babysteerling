@@ -4,6 +4,7 @@ Produces the two artifacts babysteerling.data.utils.load_dataset() expects: a si
 concatenated token tensor, and a per-document record of where each document's tokens live in
 that tensor plus its ground-truth concept ids.
 """
+
 import json
 import os
 
@@ -11,8 +12,13 @@ import torch
 from tokenizers import Tokenizer
 
 
-def tokenize_dataset(chunk_concepts_path, tokenizer_path, tokens_output_path, concepts_output_path,
-                      boundary_token="<|endoftext|>"):
+def tokenize_dataset(
+    chunk_concepts_path,
+    tokenizer_path,
+    tokens_output_path,
+    concepts_output_path,
+    boundary_token="<|endoftext|>",
+):
     """Tokenizes each concept-annotated chunk (from assign_concepts()) and records its token
     span in the concatenated stream, so per-document concept labels can be looked up later
     without re-parsing text.
@@ -24,7 +30,9 @@ def tokenize_dataset(chunk_concepts_path, tokenizer_path, tokens_output_path, co
     Idempotent: skips if both output paths already exist.
     """
     if os.path.exists(tokens_output_path) and os.path.exists(concepts_output_path):
-        print(f"Found existing {tokens_output_path} and {concepts_output_path}, skipping tokenization.")
+        print(
+            f"Found existing {tokens_output_path} and {concepts_output_path}, skipping tokenization."
+        )
         return
 
     print(f"Loading tokenizer from {tokenizer_path}...")
@@ -34,13 +42,13 @@ def tokenize_dataset(chunk_concepts_path, tokenizer_path, tokens_output_path, co
     print(f"Tokenizing chunks from {chunk_concepts_path}...")
     all_ids = []
     doc_records = []
-    with open(chunk_concepts_path, 'r', encoding='utf-8') as f:
+    with open(chunk_concepts_path, "r", encoding="utf-8") as f:
         for line in f:
             chunk = json.loads(line)
             # if one chunk == one document (as it does for a TinyStories-shaped corpus via this
             # pipeline), the boundary token alone marks the boundary; no separate [EOC] token
             # is needed
-            ids = tok.encode(chunk['text']).ids
+            ids = tok.encode(chunk["text"]).ids
             ids.append(eot_id)
 
             # record this document's span in the concatenated token stream, so concept_ids
@@ -49,12 +57,14 @@ def tokenize_dataset(chunk_concepts_path, tokenizer_path, tokens_output_path, co
             all_ids.extend(ids)
             end = len(all_ids)
 
-            doc_records.append({
-                'chunk_id': chunk['chunk_id'],
-                'start': start,
-                'end': end,
-                'concept_ids': chunk['concept_ids'],
-            })
+            doc_records.append(
+                {
+                    "chunk_id": chunk["chunk_id"],
+                    "start": start,
+                    "end": end,
+                    "concept_ids": chunk["concept_ids"],
+                }
+            )
 
     tokens = torch.tensor(all_ids, dtype=torch.long)
     os.makedirs(os.path.dirname(tokens_output_path) or ".", exist_ok=True)

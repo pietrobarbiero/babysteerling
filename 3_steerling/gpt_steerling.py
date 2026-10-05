@@ -10,7 +10,11 @@ from tokenizers import Tokenizer
 
 torch.manual_seed(1337)
 
-device = 'cuda' if torch.cuda.is_available() else ('mps' if torch.backends.mps.is_available() else 'cpu')
+device = (
+    "cuda"
+    if torch.cuda.is_available()
+    else ("mps" if torch.backends.mps.is_available() else "cpu")
+)
 
 # Params
 batch_size = 64
@@ -33,11 +37,13 @@ temperature = 0.8
 top_k = 50
 
 # Concept bottleneck params
-unknown_ratio = 3       # m = unknown_ratio * n known concepts
-unknown_rank = None     # set an int (e.g. 32) to low-rank factorize the unknown embedding table
-top_k_known = None      # set an int to sparsify known-concept activations per token
-top_k_unknown = None    # set an int to sparsify unknown-concept activations per token
-p_epsilon = 0.1         # residual dropout
+unknown_ratio = 3  # m = unknown_ratio * n known concepts
+unknown_rank = (
+    None  # set an int (e.g. 32) to low-rank factorize the unknown embedding table
+)
+top_k_known = None  # set an int to sparsify known-concept activations per token
+top_k_unknown = None  # set an int to sparsify unknown-concept activations per token
+p_epsilon = 0.1  # residual dropout
 lambda_concept = 1.0
 lambda_rec = 1.0
 lambda_indep = 1.0
@@ -61,22 +67,24 @@ doc_records = torch.load(concepts_path)  # [{chunk_id, start, end, concept_ids},
 with open(concept_lib_path) as f:
     concept_library = json.load(f)
 n_concepts = len(concept_library)
-print(f"Loaded {len(data)} tokens, {len(doc_records)} documents, {n_concepts} known concepts")
+print(
+    f"Loaded {len(data)} tokens, {len(doc_records)} documents, {n_concepts} known concepts"
+)
 
 n = int(0.9 * len(data))
 # documents are laid out contiguously and non-overlapping, so a sorted list of starts lets us
 # binary-search the small contiguous range overlapping any sampled window
-doc_starts = [d['start'] for d in doc_records]
+doc_starts = [d["start"] for d in doc_records]
 
 
 def overlapping_docs(window_start, window_end):
     i = max(bisect.bisect_right(doc_starts, window_start) - 1, 0)
     spans = []
-    while i < len(doc_records) and doc_records[i]['start'] < window_end:
+    while i < len(doc_records) and doc_records[i]["start"] < window_end:
         d = doc_records[i]
-        s, e = max(d['start'], window_start), min(d['end'], window_end)
+        s, e = max(d["start"], window_start), min(d["end"], window_end)
         if e > s:
-            spans.append((s - window_start, e - window_start, d['concept_ids']))
+            spans.append((s - window_start, e - window_start, d["concept_ids"]))
         i += 1
     return spans
 
@@ -94,10 +102,10 @@ def build_supervision(starts):
 
 
 def get_batch(split):
-    lo, hi = (0, n) if split == 'train' else (n, len(data))
+    lo, hi = (0, n) if split == "train" else (n, len(data))
     ix = torch.randint(lo, hi - block_size, (batch_size,))
-    x = torch.stack([data[i:i + block_size] for i in ix])
-    y = torch.stack([data[i + 1:i + block_size + 1] for i in ix])
+    x = torch.stack([data[i : i + block_size] for i in ix])
+    y = torch.stack([data[i + 1 : i + block_size + 1] for i in ix])
     x, y = x.to(device), y.to(device)
     return x, y, ix.tolist()
 
@@ -112,23 +120,29 @@ def get_lr(step):
 @torch.no_grad()
 def estimate_loss():
     out = {}
-    backbone.eval(); bottleneck.eval(); head.eval()
-    for split in ('train', 'val'):
-        totals = {'total': 0.0, 'lm': 0.0, 'concept': 0.0, 'rec': 0.0, 'indep': 0.0}
+    backbone.eval()
+    bottleneck.eval()
+    head.eval()
+    for split in ("train", "val"):
+        totals = {"total": 0.0, "lm": 0.0, "concept": 0.0, "rec": 0.0, "indep": 0.0}
         for _ in range(eval_iters):
             xb, yb, starts = get_batch(split)
             loss, components = compute_loss(xb, yb, starts)
-            totals['total'] += loss.item()
-            for key in ('lm', 'concept', 'rec', 'indep'):
+            totals["total"] += loss.item()
+            for key in ("lm", "concept", "rec", "indep"):
                 totals[key] += components[key]
         out[split] = {key: value / eval_iters for key, value in totals.items()}
-    backbone.train(); bottleneck.train(); head.train()
+    backbone.train()
+    bottleneck.train()
+    head.train()
     return out
 
 
 class MultiHeadAttention(nn.Module):
 
-    def __init__(self, num_heads, head_size, n_embed, block_size, dropout, num_kv_heads=None):
+    def __init__(
+        self, num_heads, head_size, n_embed, block_size, dropout, num_kv_heads=None
+    ):
         super().__init__()
         self.num_heads = num_heads
         self.head_size = head_size
@@ -154,7 +168,9 @@ class MultiHeadAttention(nn.Module):
         v = v.repeat_interleave(repeat_factor, dim=1)
 
         out = F.scaled_dot_product_attention(
-            q, k, v,
+            q,
+            k,
+            v,
             dropout_p=self.dropout_p if self.training else 0.0,
             is_causal=True,
         )
@@ -187,7 +203,14 @@ class Block(nn.Module):
     def __init__(self, n_embed, block_size, num_heads, dropout, num_kv_heads):
         super().__init__()
         head_size = n_embed // num_heads
-        self.sa_head = MultiHeadAttention(num_heads, head_size, n_embed, block_size, dropout, num_kv_heads=num_kv_heads)
+        self.sa_head = MultiHeadAttention(
+            num_heads,
+            head_size,
+            n_embed,
+            block_size,
+            dropout,
+            num_kv_heads=num_kv_heads,
+        )
         self.ffwd = FeedForward(n_embed, dropout)
         self.ln1 = nn.LayerNorm(n_embed)
         self.ln2 = nn.LayerNorm(n_embed)
@@ -202,20 +225,35 @@ class Block(nn.Module):
 
 class TransformerModel(nn.Module):
     """Backbone only: token/position embeddings through the transformer stack. Stops before
-    any LM head -- the head applies to the bottlenecked hidden state, not this raw output."""
+    any LM head -- the head applies to the bottlenecked hidden state, not this raw output.
+    """
 
-    def __init__(self, vocab_size, n_embed, block_size, num_heads, n_layers, dropout, num_kv_heads):
+    def __init__(
+        self,
+        vocab_size,
+        n_embed,
+        block_size,
+        num_heads,
+        n_layers,
+        dropout,
+        num_kv_heads,
+    ):
         super().__init__()
         self.block_size = block_size
         self.n_layers = n_layers
         self.token_embedding_table = nn.Embedding(vocab_size, n_embed)
         self.position_embedding_table = nn.Embedding(block_size, n_embed)
-        self.blocks = nn.Sequential(*[Block(n_embed, block_size, num_heads, dropout, num_kv_heads) for _ in range(n_layers)])
+        self.blocks = nn.Sequential(
+            *[
+                Block(n_embed, block_size, num_heads, dropout, num_kv_heads)
+                for _ in range(n_layers)
+            ]
+        )
         self.ln_f = nn.LayerNorm(n_embed)
 
         self.apply(self._init_weights)
         for name, p in self.named_parameters():
-            if name.endswith('proj.weight') or name.endswith('w3.weight'):
+            if name.endswith("proj.weight") or name.endswith("w3.weight"):
                 nn.init.normal_(p, mean=0.0, std=0.02 / math.sqrt(2 * n_layers))
 
     def _init_weights(self, module):
@@ -252,7 +290,9 @@ class SupervisedConceptHead(nn.Module):
     def __init__(self, d, n, hidden_dim=None, top_k=None):
         super().__init__()
         hidden_dim = hidden_dim or d
-        self.f = nn.Sequential(nn.Linear(d, hidden_dim), nn.GELU(), nn.Linear(hidden_dim, n))
+        self.f = nn.Sequential(
+            nn.Linear(d, hidden_dim), nn.GELU(), nn.Linear(hidden_dim, n)
+        )
         self.K = nn.Parameter(torch.randn(n, d) * 0.02)  # known concept embedding table
         self.top_k = top_k
 
@@ -274,7 +314,9 @@ class UnsupervisedConceptHead(nn.Module):
     def __init__(self, d, m, hidden_dim=None, rank=None, top_k=None):
         super().__init__()
         hidden_dim = hidden_dim or d
-        self.g = nn.Sequential(nn.Linear(d, hidden_dim), nn.GELU(), nn.Linear(hidden_dim, m))
+        self.g = nn.Sequential(
+            nn.Linear(d, hidden_dim), nn.GELU(), nn.Linear(hidden_dim, m)
+        )
         self.rank = rank
         if rank is None:
             self.U = nn.Parameter(torch.randn(m, d) * 0.02)
@@ -311,13 +353,23 @@ class ResidualModule(nn.Module):
 class ConceptBottleneck(nn.Module):
     """Composes the three heads: h_bar = k_hat + u_hat + epsilon."""
 
-    def __init__(self, d, n, unknown_ratio=3, p_epsilon=0.1, unknown_rank=None,
-                 top_k_known=None, top_k_unknown=None):
+    def __init__(
+        self,
+        d,
+        n,
+        unknown_ratio=3,
+        p_epsilon=0.1,
+        unknown_rank=None,
+        top_k_known=None,
+        top_k_unknown=None,
+    ):
         super().__init__()
         self.n = n
         self.m = unknown_ratio * n
         self.known = SupervisedConceptHead(d, n, top_k=top_k_known)
-        self.unknown = UnsupervisedConceptHead(d, self.m, rank=unknown_rank, top_k=top_k_unknown)
+        self.unknown = UnsupervisedConceptHead(
+            d, self.m, rank=unknown_rank, top_k=top_k_unknown
+        )
         self.residual = ResidualModule(p_epsilon)
 
     def forward(self, h, known_labels=None):
@@ -333,8 +385,13 @@ class ConceptBottleneck(nn.Module):
         h_bar = k_hat + u_hat + epsilon
 
         intermediates = {
-            'k': k, 'u': u, 'k_hat': k_hat, 'u_hat': u_hat,
-            'k_hat_gt': k_hat_gt, 'u_hat_gt': u_hat_gt, 'epsilon': epsilon,
+            "k": k,
+            "u": u,
+            "k_hat": k_hat,
+            "u_hat": u_hat,
+            "k_hat_gt": k_hat_gt,
+            "u_hat_gt": u_hat_gt,
+            "epsilon": epsilon,
         }
         return h_bar, intermediates
 
@@ -352,7 +409,9 @@ class ConceptLoss(nn.Module):
             k_chunk = 1 - torch.prod(1 - k_span, dim=0)  # OR-aggregation over the chunk
             y = k.new_zeros(n)
             y[concept_ids] = 1.0
-            total = total + F.binary_cross_entropy(k_chunk.clamp(1e-6, 1 - 1e-6), y, reduction='sum')
+            total = total + F.binary_cross_entropy(
+                k_chunk.clamp(1e-6, 1 - 1e-6), y, reduction="sum"
+            )
         return total / len(doc_spans)
 
 
@@ -377,7 +436,7 @@ class IndependenceLoss(nn.Module):
         Phi = Hk - Hk.mean(dim=0, keepdim=True)
         Psi = Hu - Hu.mean(dim=0, keepdim=True)
         cross_cov = Psi.t() @ Phi
-        return (cross_cov ** 2).sum() / (d ** 2 * max(num_tokens - 1, 1))
+        return (cross_cov**2).sum() / (d**2 * max(num_tokens - 1, 1))
 
 
 class ConceptLMHead(nn.Module):
@@ -396,12 +455,21 @@ class ConceptLMHead(nn.Module):
         return self.head(k_hat), self.head(u_hat), self.head(epsilon)
 
 
-backbone = TransformerModel(vocab_size, n_embed, block_size, num_heads, n_layers, dropout, num_kv_heads).to(device)
-bottleneck = ConceptBottleneck(
-    n_embed, n_concepts, unknown_ratio=unknown_ratio, p_epsilon=p_epsilon,
-    unknown_rank=unknown_rank, top_k_known=top_k_known, top_k_unknown=top_k_unknown,
+backbone = TransformerModel(
+    vocab_size, n_embed, block_size, num_heads, n_layers, dropout, num_kv_heads
 ).to(device)
-head = ConceptLMHead(n_embed, vocab_size, tied_embedding=backbone.token_embedding_table.weight).to(device)
+bottleneck = ConceptBottleneck(
+    n_embed,
+    n_concepts,
+    unknown_ratio=unknown_ratio,
+    p_epsilon=p_epsilon,
+    unknown_rank=unknown_rank,
+    top_k_known=top_k_known,
+    top_k_unknown=top_k_unknown,
+).to(device)
+head = ConceptLMHead(
+    n_embed, vocab_size, tied_embedding=backbone.token_embedding_table.weight
+).to(device)
 
 concept_loss_fn = ConceptLoss()
 rec_loss_fn = ReconstructionLoss()
@@ -409,10 +477,14 @@ indep_loss_fn = IndependenceLoss()
 
 # dedupe: head.weight is tied to backbone's token embedding, so naively concatenating each
 # module's .parameters() would list that tensor twice and double-step it in the optimizer
-all_params = list(dict.fromkeys(
-    list(backbone.parameters()) + list(bottleneck.parameters()) + list(head.parameters())
-))
-print(sum(p.numel() for p in all_params) / 1e6, 'M params')
+all_params = list(
+    dict.fromkeys(
+        list(backbone.parameters())
+        + list(bottleneck.parameters())
+        + list(head.parameters())
+    )
+)
+print(sum(p.numel() for p in all_params) / 1e6, "M params")
 
 
 def compute_loss(xb, yb, starts):
@@ -423,25 +495,30 @@ def compute_loss(xb, yb, starts):
 
     B, T, C = logits.shape
     lm_loss = F.cross_entropy(logits.view(B * T, C), yb.view(B * T))
-    concept_loss = concept_loss_fn(intermediates['k'], doc_spans)
-    rec_loss = rec_loss_fn(intermediates['u_hat'], intermediates['u_hat_gt'])
-    indep_loss = indep_loss_fn(intermediates['k_hat'], intermediates['u_hat'])
+    concept_loss = concept_loss_fn(intermediates["k"], doc_spans)
+    rec_loss = rec_loss_fn(intermediates["u_hat"], intermediates["u_hat_gt"])
+    indep_loss = indep_loss_fn(intermediates["k_hat"], intermediates["u_hat"])
 
-    total_loss = lm_loss + lambda_concept * concept_loss + lambda_rec * rec_loss + lambda_indep * indep_loss
+    total_loss = (
+        lm_loss
+        + lambda_concept * concept_loss
+        + lambda_rec * rec_loss
+        + lambda_indep * indep_loss
+    )
     components = {
-        'lm': lm_loss.item(),
-        'concept': concept_loss.item(),
-        'rec': rec_loss.item(),
-        'indep': indep_loss.item(),
+        "lm": lm_loss.item(),
+        "concept": concept_loss.item(),
+        "rec": rec_loss.item(),
+        "indep": indep_loss.item(),
     }
     return total_loss, components
 
 
 if os.path.exists(ckpt_path):
     ckpt = torch.load(ckpt_path, map_location=device)
-    backbone.load_state_dict(ckpt['backbone'])
-    bottleneck.load_state_dict(ckpt['bottleneck'])
-    head.load_state_dict(ckpt['head'])
+    backbone.load_state_dict(ckpt["backbone"])
+    bottleneck.load_state_dict(ckpt["bottleneck"])
+    head.load_state_dict(ckpt["head"])
     print(f"Loaded existing checkpoint from {ckpt_path}, skipping training.")
 else:
     print("No existing checkpoint found, training from scratch.")
@@ -449,11 +526,11 @@ else:
     optimizer = torch.optim.AdamW(all_params, lr=lr, weight_decay=weight_decay)
 
     for step in range(max_steps + 1):
-        xb, yb, starts = get_batch('train')
+        xb, yb, starts = get_batch("train")
 
         current_lr = get_lr(step)
         for param_group in optimizer.param_groups:
-            param_group['lr'] = current_lr
+            param_group["lr"] = current_lr
 
         loss, _ = compute_loss(xb, yb, starts)
 
@@ -467,17 +544,24 @@ else:
 
             def fmt(split):
                 s = losses[split]
-                return (f"{s['total']:.4f} (lm {s['lm']:.4f} concept {s['concept']:.4f} "
-                        f"rec {s['rec']:.4f} indep {s['indep']:.4f})")
+                return (
+                    f"{s['total']:.4f} (lm {s['lm']:.4f} concept {s['concept']:.4f} "
+                    f"rec {s['rec']:.4f} indep {s['indep']:.4f})"
+                )
 
-            print(f"step {step}, train loss: {fmt('train')}, val loss: {fmt('val')}, lr: {current_lr:.6f}")
+            print(
+                f"step {step}, train loss: {fmt('train')}, val loss: {fmt('val')}, lr: {current_lr:.6f}"
+            )
 
     os.makedirs(ckpt_dir, exist_ok=True)
-    torch.save({
-        'backbone': backbone.state_dict(),
-        'bottleneck': bottleneck.state_dict(),
-        'head': head.state_dict(),
-    }, ckpt_path)
+    torch.save(
+        {
+            "backbone": backbone.state_dict(),
+            "bottleneck": bottleneck.state_dict(),
+            "head": head.state_dict(),
+        },
+        ckpt_path,
+    )
     print(f"Training complete, saved checkpoint to {ckpt_path}")
 
 
@@ -492,7 +576,7 @@ def generate(idx, max_new_tokens, temperature=1.0, top_k=None):
 
         if top_k is not None:
             v, _ = torch.topk(logits, min(top_k, logits.size(-1)))
-            logits[logits < v[:, [-1]]] = float('-inf')
+            logits[logits < v[:, [-1]]] = float("-inf")
 
         probs = F.softmax(logits, dim=-1)
         idx_next = torch.multinomial(probs, num_samples=1)
@@ -502,4 +586,10 @@ def generate(idx, max_new_tokens, temperature=1.0, top_k=None):
 
 # generate a sample
 idx = torch.zeros((1, 1), dtype=torch.long, device=device)
-print(decode(generate(idx, max_new_tokens=max_new_tokens, temperature=temperature, top_k=top_k)[0].tolist()))
+print(
+    decode(
+        generate(
+            idx, max_new_tokens=max_new_tokens, temperature=temperature, top_k=top_k
+        )[0].tolist()
+    )
+)

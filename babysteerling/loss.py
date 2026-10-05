@@ -1,161 +1,370 @@
-"""Loss functions for the concept bottleneck model.
+from abc import ABC, abstractmethod
+from dataclasses import field, dataclass
 
-Pure functions only: everything here works from logits/intermediates already produced by the
-model's forward pass. Nothing in this file runs the model.
-
-Four terms make up the total training loss:
-  1. Language modeling loss: the actual next-token prediction task. Plain F.cross_entropy,
-     kept inline below (no need for its own class).
-  2. Concept loss: did the known-concept head predict the right concepts?
-  3. Reconstruction loss: does the unknown head capture what the known concepts leave out?
-  4. Independence loss: are the known and unknown parts decorrelated, so they don't both encode
-     the same information?
-"""
 import torch
 import torch.nn as nn
 from torch.nn import functional as F
+from torch_concepts.nn import InferenceOutput
 
 
-class ConceptLoss(nn.Module):
-    """BCE over per-document concept labels, aggregated across the document with a soft-OR.
+@dataclass
+class LossOutput:
+    """Structured return type for loss modules and composite loss orchestrators."""
 
-    A document's label means "concept c appears somewhere in this document", not "at every
-    token". So for each concept we combine its per-token predictions into one per-document
-    probability with a soft-OR (1 minus the product of "concept absent" over every token), then
-    compare that to the 0/1 label. The loss is satisfied as soon as one token confidently
-    predicts the concept.
+    loss: torch.Tensor
+    metrics_dict: dict[str, float] = field(default_factory=dict)
 
-    The aggregation has to happen in LOG space. Computed directly as `1 - prod(1 - alpha_k)`, the product
-    underflows for any realistic span: at activations of 0.5 over a 220-token document it reads 1.0
-    to float32 precision, so an absent concept's term pins at the clamp and becomes a constant
-    -log(1e-6) = 13.8 with no gradient at all. Summing log(1 - alpha_k) instead keeps every token's
-    contribution alive however saturated the aggregate is.
+    def item(self) -> float:
+        """Convenience method to get scalar value of total_loss."""
+        return self.loss.item()
 
-    Reduced with mean rather than sum over concepts, so the term doesn't scale with the size of the
-    concept library.
+    def merge(self, other: "LossOutput") -> "LossOutput":
+        """Merges another LossOutput into this one by adding total_losses and summing overlapping metric values."""
+        merged_metrics = self.metrics_dict.copy()
+        for k, v in other.metrics_dict.items():
+            merged_metrics[k] = merged_metrics.get(k, 0.0) + v
+
+        return LossOutput(
+            loss=self.loss + other.loss,
+            metrics_dict=merged_metrics,
+        )
+
+    def __add__(self, other: "LossOutput | torch.Tensor") -> "LossOutput":
+        """Supports `output_a + output_b` operator syntax."""
+        if isinstance(other, LossOutput):
+            return self.merge(other)
+        elif isinstance(other, torch.Tensor):
+            return LossOutput(
+                loss=self.loss + other,
+                metrics_dict=self.metrics_dict.copy(),
+            )
+        return NotImplemented
+
+    def __radd__(self, other: "LossOutput | torch.Tensor | int") -> "LossOutput":
+        """Supports `sum([loss1, loss2])` starting from 0."""
+        if other == 0:
+            return self
+        return self.__add__(other)
+
+
+class Loss(ABC):
+    """Abstract base class for modular loss functions."""
+
+    @abstractmethod
+    def forward(self, output: InferenceOutput, batch: dict) -> torch.Tensor:
+        """Computes and returns a differentiable loss tensor."""
+        pass
+
+
+class CompositeLoss(nn.Module):
+    """Meta-loss orchestrator that computes a weighted sum of Loss objects
+    and collects diagnostic Metric values.
     """
+
+    def __init__(
+        self,
+        losses: dict[str, tuple[nn.Module, float]],
+        metrics: dict[str, nn.Module] | None = None,
+    ):
+        super().__init__()
+        self.loss_modules = nn.ModuleDict(
+            {name: module for name, (module, _) in losses.items()}
+        )
+        self.weights = {name: weight for name, (_, weight) in losses.items()}
+        self.metric_modules = nn.ModuleDict(metrics or {})
+
+    def forward(
+        self,
+        outputs: InferenceOutput | dict[str, InferenceOutput],
+        batch: dict | None = None,
+        active_losses: list[str] | None = None,
+        active_metrics: list[str] | None = None,
+    ) -> LossOutput:
+        device = (
+            next(self.parameters()).device
+            if list(self.parameters())
+            else torch.device("cpu")
+        )
+        total_loss = torch.tensor(0.0, device=device)
+        metrics_dict: dict[str, float] = {}
+
+        # 1. Compute weighted loss terms
+        if active_losses:
+            for name in active_losses:
+                if name not in self.loss_modules:
+                    continue
+
+                loss_fn = self.loss_modules[name]
+                weight = self.weights[name]
+                if weight == 0.0:
+                    continue
+
+                loss_val = loss_fn(outputs, batch)
+
+                total_loss = total_loss + (weight * loss_val)
+
+                metrics_dict[f"{name}_loss"] = loss_val.detach().item()
+                if weight != 1.0:
+                    metrics_dict[f"{name}_loss_weighted"] = (
+                        (weight * loss_val).detach().item()
+                    )
+
+        metrics_dict["total_loss"] = total_loss.detach().item()
+
+        # 2. Update stateful metrics across batches (eval only)
+        if not self.training and active_metrics:
+            for name in active_metrics:
+                if name in self.metric_modules:
+                    self.metric_modules[name].update(outputs, batch)
+
+        loss_output = LossOutput(loss=total_loss, metrics_dict=metrics_dict)
+
+        return loss_output
+
+    def compute_metrics(
+        self, active_metrics: list[str] | None = None
+    ) -> dict[str, float]:
+        """Computes and resets accumulated epoch-level metrics (e.g., AUC, Accuracy)."""
+        eval_metrics = {}
+        for name, metric in self.metric_modules.items():
+            if active_metrics is not None and name not in active_metrics:
+                continue
+
+            # torchmetrics or custom metrics returning a dict or tensor
+            metric_val = metric.compute() if hasattr(metric, "compute") else None
+            if isinstance(metric_val, dict):
+                for k, v in metric_val.items():
+                    eval_metrics[k] = v.item() if isinstance(v, torch.Tensor) else v
+            elif isinstance(metric_val, torch.Tensor):
+                eval_metrics[name] = metric_val.item()
+
+            if hasattr(metric, "reset"):
+                metric.reset()
+        return eval_metrics
+
+    def reset_metrics(self, active_metrics: list[str] | None = None):
+        """Call this at epoch end/start to clear state accumulators."""
+        for name, metric in self.metric_modules.items():
+            if active_metrics is not None and name not in active_metrics:
+                continue
+            if hasattr(metric, "reset"):
+                metric.reset()
+
+
+class TokenLoss(nn.Module, Loss):
+    """Token-level cross-entropy loss."""
+
+    def __init__(self, ignore_index: int = -100):
+        super().__init__()
+        self.ignore_index = ignore_index
+
+    def forward(self, output: InferenceOutput, batch: dict) -> torch.Tensor:
+        logits = output.logits["next_token"]
+        targets = batch["targets"]
+
+        B, T, C = logits.shape
+        return F.cross_entropy(
+            logits.view(B * T, C),
+            targets.view(B * T),
+            ignore_index=self.ignore_index,
+        )
+
+
+class DiffusionTokenLoss(nn.Module, Loss):
+    """Masked-diffusion token loss with optional 1/p_mask ELBO importance weighting.
+
+    Expects in batch:
+        - "targets": LongTensor [B, T]
+        - "mask": BoolTensor [B, T] indicating which positions were corrupted/masked
+        - "mask_weights" (optional): Tensor [B, T] of sampling probabilities p_mask for weighting
+    """
+
+    def __init__(self, ignore_index: int = -100):
+        super().__init__()
+        self.ignore_index = ignore_index
+
+    def forward(self, output: InferenceOutput, batch: dict) -> torch.Tensor:
+        logits = output.logits["next_token"]
+        targets = batch.get("targets", None)
+        mask = output.mask if hasattr(output, "mask") else None
+
+        if targets is None or mask is None or mask.sum() == 0:
+            return torch.tensor(0.0, device=logits.device)
+
+        mask_weights = output.p_mask if hasattr(output, "p_mask") else None
+
+        # Masked cross entropy: [n_masked, vocab] vs [n_masked]
+        ce = F.cross_entropy(logits[mask], targets[mask], reduction="none")
+
+        if mask_weights is None:
+            return ce.mean()
+
+        # Weighted mean: weight each position by 1 / p_mask
+        w = 1.0 / mask_weights[mask]
+        return (ce * w).sum() / w.sum()
+
+
+class ConceptLoss(nn.Module, Loss):
+    """Document-level soft-OR loss over predicted known concepts."""
 
     P_MAX = 1 - 1e-6  # ceiling on activations, so log1p(-p) can't hit log(0)
 
-    def forward(self, alpha_k, doc_spans, return_accuracy=False):
-        """
-        alpha_k: [B, T, n] predicted known-concept activations (post-sigmoid).
-        doc_spans: list of (batch_idx, tok_start, tok_end, concept_ids), one per document that
-            overlaps this batch of windows (see data/utils.py's build_supervision()).
-        return_accuracy=True also returns two accuracies, computed in the same loop as the loss:
-        OR-aggregated (matches the loss's own semantics: does the doc-level soft-OR prediction
-        match the doc-level label) and per-token (does each individual token's own prediction
-        match that same doc-level label, without aggregating first -- a stricter, more granular
-        view, at the cost of scoring the same label once per token instead of once per document).
-        """
+    def forward(self, output: InferenceOutput, batch: dict) -> torch.Tensor:
+        logits = output.logits["concepts"]
+        if logits is None:
+            return torch.tensor(0.0, device=output.logits.device)
+
+        doc_spans = batch.get("doc_spans", [])
         if not doc_spans:
-            zero = torch.tensor(0.0, device=alpha_k.device)
-            return (zero, zero, zero) if return_accuracy else zero
-        n = alpha_k.shape[-1]
-        total = alpha_k.new_zeros(())
-        correct_or = alpha_k.new_zeros(())
-        correct_per_token = alpha_k.new_zeros(())
-        n_tokens = 0
+            return torch.tensor(0.0, device=logits.device)
+
+        n = logits.shape[-1]
+        total = logits.new_zeros(())
         for batch_idx, tok_start, tok_end, concept_ids in doc_spans:
-            alpha_span = alpha_k[batch_idx, tok_start:tok_end, :]  # shape: [B, T, n] -> [doc_len, n], this doc's own tokens only
-            # log P(concept absent from the whole span) = sum over tokens of log(1 - alpha_k). Deliberately
-            # not floored: this term is used directly below, and a floor would cap it at a constant
-            # and kill the gradient for exactly the long spans that need it.
-            log_p_none = torch.log1p(-alpha_span.clamp(max=self.P_MAX)).sum(dim=0)  # shape: [doc_len, n] -> [n]
-            # p_none underflowing to 0 on a saturated span is correct: log_p_any then reads 0, i.e.
-            # "certainly present", and there is nothing left to improve.
-            log_p_any = torch.log1p(-log_p_none.exp())  # shape: [n], log of the soft-OR
-            y = alpha_k.new_zeros(n)  # shape: [n], multi-hot ground-truth label for this document
+            # Span logits shape: [doc_len, n]
+            z_span = logits[batch_idx, tok_start:tok_end, :]
+
+            # log P(concept absent) = sum over tokens of -softplus(z_i)
+            # strictly negative for all unconstrained logits z_i
+            # log_p_none = -F.softplus(z_span).sum(dim=0)  # shape: [n]
+            doc_len = z_span.shape[0]
+            # Scaling softplus sum by length (or sqrt(length)) prevents long spans from dominating
+            log_p_none = -F.softplus(z_span).sum(dim=0) / (doc_len**0.5)
+
+            # Ensure log_p_none is strictly negative (<= -1e-7) so exp(log_p_none) < 1.0,
+            # preventing log1p(-1.0) = log(0)
+            log_p_none_safe = log_p_none.clamp(max=-1e-7)
+
+            # log P(concept present somewhere in span) = log(1 - P(none))
+            # Exactly matches your original `torch.log1p(-log_p_none.exp())`
+            log_p_any = torch.log1p(-torch.exp(log_p_none_safe))  # shape: [n]
+
+            y = logits.new_zeros(n)  # multi-hot ground truth label
             y[concept_ids] = 1.0
-            # BCE written out, so the absent term is -log_p_none directly (a sum of per-token
-            # penalties) rather than -log(1 - soft_or), which saturates
-            total = total + -(y * log_p_any + (1 - y) * log_p_none).mean()
-            if return_accuracy:
-                correct_or = correct_or + ((log_p_any.detach().exp() > 0.5) == y.bool()).float().sum()
-                correct_per_token = correct_per_token + (
-                    (alpha_span.detach() > 0.5) == y.bool().unsqueeze(0)
-                ).float().sum()  # y broadcasts to every token in the doc's span
-                n_tokens += alpha_span.shape[0]
-        loss = total / len(doc_spans)  # average per-document loss, so batch size doesn't change the scale
-        if return_accuracy:
-            return loss, correct_or / (len(doc_spans) * n), correct_per_token / (n_tokens * n)
-        return loss
+
+            # # BCE loss: -(y * log_p_any + (1 - y) * log_p_none)
+            # doc_loss = -(y * log_p_any + (1 - y) * log_p_none).mean()
+
+            pos_mask = y == 1.0
+            neg_mask = y == 0.0
+
+            # Average per positive concept
+            pos_loss = (
+                -log_p_any[pos_mask].mean()
+                if pos_mask.any()
+                else logits.new_tensor(0.0)
+            )
+
+            # Average per negative concept
+            neg_loss = (
+                -log_p_none[neg_mask].mean()
+                if neg_mask.any()
+                else logits.new_tensor(0.0)
+            )
+
+            # Each group contributes equally (1:1 weight) regardless of how sparse y is
+            doc_loss = pos_loss + neg_loss
+
+            total = total + doc_loss
+
+        return total / len(
+            doc_spans
+        )  # average per-document loss, so batch size doesn't change the scale
 
 
-def selected_concept_diagnostics(alpha_k, known_labels, doc_spans=None, eps=1e-6):
-    """Diagnostic BCE and accuracy for sparse, prototype-routed encoders like
-    known_encoder_type="linear_selector". Never contributes a gradient (see
-    model.use_concept_loss).
+class DiffusionConceptLoss(nn.Module, Loss):
+    """Mask-aware document-level soft-OR concept loss for diffusion."""
 
-    Only scores the concepts actually selected at each (batch, token) position. alpha_k is exactly 0
-    everywhere else (see nn.prototype.PrototypePredictor), so scoring every slot the way
-    ConceptLoss does would count every unselected concept as a free true negative and bias the
-    metric.
+    def forward(self, output: InferenceOutput, batch: dict) -> torch.Tensor:
+        logits = output.logits["concepts"]
+        if logits is None:
+            return torch.tensor(0.0, device=output.logits.device)
 
-    alpha_k's value axis is [-1, +1] (see nn.prototype._fixed_value_axis), rescaled to [0, 1] via
-    (alpha_k+1)/2 before BCE.
+        mask = getattr(output, "mask", None)
+        doc_spans = batch.get("doc_spans", [])
 
-    doc_spans, if given, also returns an OR-aggregated accuracy: per document, per concept that
-    was selected at least once somewhere in it, "present" if any selected token's rescaled
-    probability exceeds 0.5 (a soft-OR over selected positions only, same style as ConceptLoss's
-    own aggregation) -- matches ConceptLoss's accuracy semantics instead of this function's usual
-    per-token one. A concept never selected anywhere in a document isn't scored at all (same
-    "only score what was actually selected" rule as the per-token accuracy above), rather than
-    counted as a free true negative.
-    """
-    with torch.no_grad():
-        mask = alpha_k != 0
-        if mask.sum() == 0:
-            zero = torch.tensor(0.0, device=alpha_k.device)
-            return (zero, zero, zero) if doc_spans is not None else (zero, zero)
-        probs = ((alpha_k[mask] + 1) / 2).clamp(eps, 1 - eps)
-        target = known_labels[mask].float()
-        bce = F.binary_cross_entropy(probs, target)
-        accuracy = ((probs > 0.5) == target.bool()).float().mean()
+        if logits is None or not doc_spans or mask is None or mask.sum() == 0:
+            return torch.tensor(
+                0.0, device=logits.device if logits is not None else torch.device("cpu")
+            )
 
-        if doc_spans is None:
-            return bce, accuracy
+        n = logits.shape[-1]
+        total = logits.new_zeros(())
+        valid_spans = 0
 
-        n = alpha_k.shape[-1]
-        prob_full = (alpha_k + 1) / 2  # shape: [B, T, n]; unscored (alpha_k==0) positions read 0.5, excluded below via mask
-        or_correct = alpha_k.new_zeros(())
-        n_scored = alpha_k.new_zeros(())
         for batch_idx, tok_start, tok_end, concept_ids in doc_spans:
-            p_span = prob_full[batch_idx, tok_start:tok_end, :]  # shape: [doc_len, n]
-            s_span = mask[batch_idx, tok_start:tok_end, :]  # shape: [doc_len, n]
-            scored_here = s_span.any(dim=0)  # shape: [n], which concepts were selected anywhere in this doc
-            if scored_here.sum() == 0:
+            # Mask slice for this span [doc_len]
+            span_mask = mask[batch_idx, tok_start:tok_end]
+
+            # If no tokens were masked in this span, skip (no diffusion loss step)
+            if not span_mask.any():
                 continue
-            p_for_or = torch.where(s_span, p_span, torch.zeros_like(p_span))  # unselected -> 0, no effect on the product below
-            doc_prob = 1 - torch.prod(1 - p_for_or, dim=0)  # shape: [n], soft-OR over selected positions only
-            y = alpha_k.new_zeros(n)
+
+            # Logits for MASKED tokens only [n_masked, n]
+            z_span = logits[batch_idx, tok_start:tok_end, :][span_mask]
+
+            # True soft-OR log P(absent) over corrupted/predicted positions.
+            # Scaling by sqrt(n_masked) prevents spans with many masked positions from
+            # dominating, mirroring ConceptLoss's length normalization.
+            n_masked = z_span.shape[0]
+            log_p_none = -F.softplus(z_span).sum(dim=0) / (n_masked**0.5)
+            log_p_none_safe = log_p_none.clamp(max=-1e-7)
+            log_p_any = torch.log1p(-torch.exp(log_p_none_safe))
+
+            y = logits.new_zeros(n)
             y[concept_ids] = 1.0
-            or_correct = or_correct + ((doc_prob > 0.5) == y.bool())[scored_here].float().sum()
-            n_scored = n_scored + scored_here.sum()
-        or_accuracy = or_correct / n_scored.clamp(min=1)
-        return bce, accuracy, or_accuracy
+
+            pos_mask = y == 1.0
+            neg_mask = y == 0.0
+
+            pos_loss = (
+                -log_p_any[pos_mask].mean()
+                if pos_mask.any()
+                else logits.new_tensor(0.0)
+            )
+            neg_loss = (
+                -log_p_none[neg_mask].mean()
+                if neg_mask.any()
+                else logits.new_tensor(0.0)
+            )
+
+            total = total + (pos_loss + neg_loss)
+            valid_spans += 1
+
+        return total / max(valid_spans, 1)
 
 
-class ReconstructionLoss(nn.Module):
-    """MSE between the unknown head's u and its target (h minus the known concepts'
-    contribution). Trains the unknown head to capture exactly what the known concepts miss.
+# Losses for unknown/residual models
 
-    mask, if given (e.g. the diffusion corruption mask), restricts the loss to those positions.
-    None (default) uses every position, which is correct for the causal backbone.
-    """
 
-    def forward(self, u, u_target, mask=None):
+class ReconstructionLoss(nn.Module, Loss):
+    """MSE between residual representation and target."""
+
+    def forward(
+        self, output: dict[str, InferenceOutput], batch: dict = None
+    ) -> torch.Tensor:
+        u = output["unknown_out"].value["unknown_embedding"]
+        if u is None:
+            return torch.tensor(0.0, device=output["unknown_out"].value.device)
+
+        u_target = output["unknown_target_embeddings_out"].value[
+            "unknown_target_embedding"
+        ]
         if u_target is None:
+            return torch.tensor(0.0, device=output["unknown_out"].value.device)
+
+        if not hasattr(output["unknown_out"], "mask"):
+            return ((u - u_target) ** 2).mean()
+
+        if output["unknown_out"].mask.sum() == 0:
             return torch.tensor(0.0, device=u.device)
-        if mask is None:
-            return ((u - u_target) ** 2).mean()  # shape: [B, T, d] -> scalar
-        if mask.sum() == 0:
-            return torch.tensor(0.0, device=u.device)
-        diff = u[mask] - u_target[mask]  # shape: [B, T, d] -> [n_masked, d]
-        return (diff ** 2).mean()
+
+        return (
+            (u[output["unknown_out"].mask] - u_target[output["unknown_out"].mask]) ** 2
+        ).mean()
 
 
-class IndependenceLoss(nn.Module):
+class IndependenceLoss(nn.Module, Loss):
     """Penalizes correlation between k and u, so the unknown head doesn't just re-learn
     what the known head already captures.
 
@@ -164,97 +373,104 @@ class IndependenceLoss(nn.Module):
     labels.
     """
 
-    MAX_VALUE = 1.0  # ceiling, so a single large-covariance batch can't dominate the total loss
+    MAX_VALUE = (
+        1.0  # ceiling, so a single large-covariance batch can't dominate the total loss
+    )
 
-    def forward(self, k, u):
+    def forward(
+        self, output: dict[str, InferenceOutput], batch: dict = None
+    ) -> torch.Tensor:
+        k = output["known_out"].value["known_embedding"]
+        if k is None:
+            return torch.tensor(0.0, device=output["known_out"].value.device)
+
+        val = output["other_out"].value
+        u = val["unknown_embedding"] if "residual" not in val else val["residual"]
+        if u is None:
+            return torch.tensor(0.0, device=output["known_out"].value.device)
+
         d = k.shape[-1]
-        Hk = k.detach().reshape(-1, d)  # shape: [B, T, d] -> [B*T, d], flatten batch+time into one axis of "samples"
+        Hk = k.detach().reshape(
+            -1, d
+        )  # shape: [B, T, d] -> [B*T, d], flatten batch+time into one axis of "samples"
         Hu = u.reshape(-1, d)  # shape: [B, T, d] -> [B*T, d]
         num_tokens = Hk.shape[0]
 
-        Phi = Hk - Hk.mean(dim=0, keepdim=True)  # shape: [B*T, d], center each feature across the batch
+        Phi = Hk - Hk.mean(
+            dim=0, keepdim=True
+        )  # shape: [B*T, d], center each feature across the batch
         Psi = Hu - Hu.mean(dim=0, keepdim=True)  # shape: [B*T, d]
-        cross_cov = Psi.t() @ Phi  # shape: [d, B*T] @ [B*T, d] -> [d, d], empirical cross-covariance matrix
-        hsic = (cross_cov ** 2).sum() / (d ** 2 * max(num_tokens - 1, 1))  # normalized Frobenius norm^2
+        cross_cov = (
+            Psi.t() @ Phi
+        )  # shape: [d, B*T] @ [B*T, d] -> [d, d], empirical cross-covariance matrix
+        hsic = (cross_cov**2).sum() / (
+            d**2 * max(num_tokens - 1, 1)
+        )  # normalized Frobenius norm^2
         return hsic.clamp(max=self.MAX_VALUE)
 
 
-# shared singletons: these losses have no learnable parameters, so one instance is enough
-_concept_loss_fn = ConceptLoss()
-_rec_loss_fn = ReconstructionLoss()
-_indep_loss_fn = IndependenceLoss()
+# Losses for interventions
 
 
-def compute_losses(logits, targets, intermediates, doc_spans, known_labels=None,
-                    lambda_concept=1.0, lambda_rec=1.0, lambda_indep=1.0, mask=None,
-                    mask_weights=None, use_concept_loss=True):
-    """Combines all four loss terms into the total training loss.
+class RespondLoss(nn.Module, Loss):
+    """Eq. 31: Pushes the injected concept's activation alpha_c toward 1
 
-    mask, if given (e.g. the diffusion backbone's corruption mask), restricts the LM and
-    reconstruction losses to those positions. None (default) scores every position, which is
-    correct for the causal backbone.
-    intermediates: the dict returned by ConceptBottleneck.forward().
-    known_labels: [B, T, n] dense multi-hot ground truth, only used when use_concept_loss=False.
-    use_concept_loss=False (see model.use_concept_loss) drops ConceptLoss from total_loss and
-    reports selected_concept_diagnostics instead for components['concept'/'concept_accuracy_or'/
-    'concept_accuracy_per_token'], purely for logging (see that function for why). Both
-    accuracies are always reported regardless of use_concept_loss, so the two encoder families
-    stay comparable on the same terms instead of each only ever exposing the one its own loss
-    happens to aggregate by.
-    Returns (total_loss, components), a plain dict of floats for logging each term.
+    at its attributed positions, training the concept module to recognize
+    the concept it was guided toward. Works in logit space like the other losses
+    (-log(sigmoid(z)) == softplus(-z)), no explicit sigmoid needed.
+
+    Expects in batch:
+        - "random_intervention_ids": per-row concept index, broadcastable to [B, 1, 1].
+        - "position_mask": BoolTensor [B, T] marking attributed positions.
     """
-    B, T, C = logits.shape
-    pred_ids = logits.argmax(-1)  # shape: [B, T, vocab] -> [B, T]
-    if mask is None:
-        lm_loss = F.cross_entropy(logits.view(B * T, C), targets.view(B * T))  # shape: [B, T, vocab] -> [B*T, vocab] vs [B*T]
-        lm_accuracy = (pred_ids == targets).float().mean()
-    elif mask.sum() == 0:
-        lm_loss = torch.tensor(0.0, device=logits.device)
-        lm_accuracy = torch.tensor(0.0, device=logits.device)
-    else:
-        ce = F.cross_entropy(logits[mask], targets[mask], reduction='none')  # shape: [B, T, vocab] -> [n_masked, vocab] vs [n_masked]
-        if mask_weights is None:
-            lm_loss = ce.mean()
-        else:
-            # the masked-diffusion ELBO weights each masked position by 1/p_mask, so that blocks
-            # with a low noise level aren't under-counted. Normalizing by the weight sum rather
-            # than the token count keeps it a weighted mean: the large weights a small t produces
-            # then appear on both sides and cancel, instead of dominating the gradient.
-            w = 1.0 / mask_weights[mask]  # shape: [n_masked]
-            lm_loss = (ce * w).sum() / w.sum()
-        lm_accuracy = (pred_ids[mask] == targets[mask]).float().mean()
 
-    if not intermediates:  # no bottleneck: cross-entropy is the whole loss
-        components = {'total': lm_loss.item(), 'lm': lm_loss.item(), 'lm_accuracy': lm_accuracy.item()}
-        components.update(concept=0.0, concept_accuracy_or=0.0, concept_accuracy_per_token=0.0,
-                          rec=0.0, indep=0.0)
-        return lm_loss, components
+    def forward(self, output: InferenceOutput, batch: dict) -> torch.Tensor:
+        logits = output.logits["concepts"]  # shape: [B, T, n]
+        if logits is None:
+            return torch.tensor(0.0, device=output.logits.device)
 
-    if use_concept_loss:
-        concept_loss, concept_accuracy_or, concept_accuracy_per_token = _concept_loss_fn(
-            intermediates['alpha_k'], doc_spans, return_accuracy=True,
-        )
-    else:
-        concept_loss, concept_accuracy_per_token, concept_accuracy_or = selected_concept_diagnostics(
-            intermediates['alpha_k'], known_labels, doc_spans=doc_spans,
-        )
-    rec_loss = _rec_loss_fn(intermediates['u'], intermediates['u_target'], mask=mask)
-    # against both other channels: epsilon was previously unconstrained, so it could freely carry
-    # whatever the known head encodes
-    indep_loss = (_indep_loss_fn(intermediates['k'], intermediates['u'])
-                  + _indep_loss_fn(intermediates['k'], intermediates['epsilon']))
+        position_mask = batch.get("position_mask", None)
+        concept_ids = batch.get("random_intervention_ids", None)
 
-    total_loss = lm_loss + lambda_rec * rec_loss + lambda_indep * indep_loss
-    if use_concept_loss:
-        total_loss = total_loss + lambda_concept * concept_loss  # else: diagnostic only, never optimized (see docstring)
-    components = {
-        'total': total_loss.item(),
-        'lm': lm_loss.item(),
-        'lm_accuracy': lm_accuracy.item(),
-        'concept': concept_loss.item(),
-        'concept_accuracy_or': concept_accuracy_or.item(),
-        'concept_accuracy_per_token': concept_accuracy_per_token.item(),
-        'rec': rec_loss.item(),
-        'indep': indep_loss.item(),
-    }
-    return total_loss, components
+        if position_mask is None or concept_ids is None or position_mask.sum() == 0:
+            return torch.tensor(0.0, device=logits.device)
+
+        B, T, n = logits.shape
+        idx = concept_ids.reshape(B, 1, 1).expand(B, T, 1).long()  # shape: [B, T, 1]
+        z_c = logits.gather(-1, idx).squeeze(
+            -1
+        )  # shape: [B, T], each row's own intervened concept logit
+
+        return F.softplus(-z_c[position_mask]).mean()
+
+
+class ExpressLoss(nn.Module, Loss):
+    """Eq. 32: Pushes the model's output token distribution toward the concept's lifted tokens at attributed positions.
+
+    Expects in batch:
+        - "lifted_token_ids": Collection/Tensor of token IDs for the target concept.
+        - "position_mask": BoolTensor [B, T] marking attributed positions.
+    """
+
+    def __init__(self, eps: float = 1e-6):
+        super().__init__()
+        self.eps = eps
+
+    def forward(self, output: InferenceOutput, batch: dict) -> torch.Tensor:
+        logits = output.logits["next_token"]
+        position_mask = batch.get("position_mask", None)
+        lifted_token_ids = batch.get("lifted_tokens_intervention_ids", None)
+
+        if (
+            position_mask is None
+            or lifted_token_ids is None
+            or len(lifted_token_ids) == 0
+            or position_mask.sum() == 0
+        ):
+            return torch.tensor(0.0, device=logits.device)
+
+        probs = F.softmax(logits, dim=-1)  # shape: [B, T, vocab]
+        mass = torch.take_along_dim(probs, lifted_token_ids.long(), dim=-1).sum(
+            dim=-1
+        )  # shape: [B, T]
+        return -torch.log(mass[position_mask].clamp(self.eps, 1.0)).mean()

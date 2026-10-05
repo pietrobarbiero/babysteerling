@@ -1,0 +1,4 @@
+# @package _global_
+defaults:
+  - override /model: alm_cb
+  - override /loss: default

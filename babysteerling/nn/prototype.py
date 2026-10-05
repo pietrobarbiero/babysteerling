@@ -1,47 +1,3 @@
-"""Known-concept encoders that score concepts against their own prototype texts (positive/
-negative/unrelated, from babysteerling.data.babyatlas.build_concept_prototypes), instead of a
-dense sigmoid(MLP(h)) over the whole library (see encoder.py's SparseEmbeddingToConcept). Meant
-for concept libraries too large for a dense [d, Kt] projection (Kt in the 100k-1M range).
-
-Two pieces, not one: a Selector picks which candidate concept ids a token should be scored
-against (forward(x) -> (idx, weight)); a Predictor scores those candidates against their
-prototypes and writes the result into a dense [B, T, Kt] activation (forward(x, idx, weight) ->
-k_dense). PrototypeConceptEncoder combines any Selector with PrototypePredictor into the
-activation()/embed()/forward()/ground_truth_embedding()/.K interface ConceptBottleneck expects,
-so you can swap LinearSelector for ProductKeySelector without changing how candidates get scored.
-
-Two Selectors:
-  LinearSelector:    Linear(d, Kt) + top-k. Cost O(d*Kt) per token, same as the dense baseline.
-                     Use this while Kt is small enough for a dense [d, Kt] projection to be cheap.
-  ProductKeySelector: factorized row/col retrieval (sqrt(Kt) keys per axis). Cost O(sqrt(Kt) +
-                     topk_axis^2) per token. Use this once Kt is too big for LinearSelector
-                     (100k-1M).
-
-Every Selector's `weight` is exactly 1.0 in the forward pass (a straight-through estimator, the
-same trick pytorch_concepts' build_mask() uses), so PrototypePredictor's output is a pure
-similarity score, not distorted by how confident the selector was. The only job of `weight` is
-to carry gradient back into the selector: top-k's indices carry none, so without this a selector
-would never learn past its random init.
-
-PrototypeCrossAttention is not built from a Selector + Predictor: it scores every concept for
-every token (chunked, and gradient-checkpointed to bound memory), so there's no per-token
-candidate list to gather. It's O(Kt) per token no matter what; use ProductKeySelector instead if
-you need sub-O(Kt) compute.
-
-All three mechanisms read prototypes through the model's own live parameters, so concept
-representations live in the same space the rest of the model trains in. PrototypePredictor goes
-further and runs its (deduped) candidates through the full backbone, so a prototype gets exactly
-as much processing as the real input it's compared against; PrototypeCrossAttention only uses
-the token embedding table, since it touches all Kt concepts every call and can't afford a full
-backbone pass per concept. Each concept's [Kt, d] value embedding (self.K, used to build the embedding
-and as babysteerling.steering's steering direction) stays a plain learned parameter, same as in
-SparseEmbeddingToConcept; only the activation (which concepts fire, how strongly) comes from
-prototypes.
-
-The value axis (self.value) is fixed, not learned: build_concept_prototypes groups prototypes
-into negative/unrelated/positive, and load_concept_prototype_tokens loads them in that order, so
-self.value is just [-1]*per_type + [0]*per_type + [1]*per_type.
-"""
 import math
 
 import torch
@@ -71,7 +27,7 @@ def _fixed_value_axis(proto_token_ids):
     order; see data.utils.load_concept_prototype_tokens). Returns the fixed value buffer
     [-1]*per_type + [0]*per_type + [1]*per_type."""
     per_type = proto_token_ids.shape[1] // 3
-    return torch.tensor([-1.] * per_type + [0.] * per_type + [1.] * per_type)
+    return torch.tensor([-1.0] * per_type + [0.0] * per_type + [1.0] * per_type)
 
 
 class LinearSelector(nn.Module):
@@ -101,10 +57,14 @@ class LinearSelector(nn.Module):
         scores = self.score(x)  # shape: [B, T, Kt]
         if self.training:
             scores = scores + torch.randn_like(scores) * F.softplus(self.noise(x))
-        vals, idx = scores.topk(self.candidates_per_token, dim=-1)  # shape: [B, T, C] (both)
+        vals, idx = scores.topk(
+            self.candidates_per_token, dim=-1
+        )  # shape: [B, T, C] (both)
         # forward value is exactly 1.0 (detach blocks gradient, not the arithmetic); backward
         # flows through sigmoid(v)
-        weight = (torch.ones_like(vals) - torch.sigmoid(vals)).detach() + torch.sigmoid(vals)
+        weight = (torch.ones_like(vals) - torch.sigmoid(vals)).detach() + torch.sigmoid(
+            vals
+        )
         return idx, weight
 
 
@@ -133,8 +93,12 @@ class ProductKeySelector(nn.Module):
         self.Ktr = math.isqrt(Kt)
         while self.Ktr * self.Ktr < Kt:
             self.Ktr += 1  # grid must cover every concept id even when Kt isn't a perfect square
-        assert topk_axis < self.Ktr, f"topk_axis ({topk_axis}) must be smaller than Ktr ({self.Ktr})"
-        self.topk_axis = topk_axis  # this alone determines sparsity (topk_axis**2 candidates)
+        assert (
+            topk_axis < self.Ktr
+        ), f"topk_axis ({topk_axis}) must be smaller than Ktr ({self.Ktr})"
+        self.topk_axis = (
+            topk_axis  # this alone determines sparsity (topk_axis**2 candidates)
+        )
         H = key_dim or min(d, 32)  # a routing key doesn't need the full hidden width
 
         self.row_keys = nn.Parameter(torch.randn(self.Ktr, H) * 0.02)
@@ -152,18 +116,32 @@ class ProductKeySelector(nn.Module):
         if self.training:
             # noisy top-k for exploration (Shazeer et al. 2017's noisy gating); off at eval so
             # inference is deterministic given fixed weights
-            row_scores = row_scores + torch.randn_like(row_scores) * F.softplus(self.row_noise(x))
-            col_scores = col_scores + torch.randn_like(col_scores) * F.softplus(self.col_noise(x))
+            row_scores = row_scores + torch.randn_like(row_scores) * F.softplus(
+                self.row_noise(x)
+            )
+            col_scores = col_scores + torch.randn_like(col_scores) * F.softplus(
+                self.col_noise(x)
+            )
 
-        row_vals, row_idx = row_scores.topk(self.topk_axis, dim=-1)  # shape: [B, T, topk_axis] (both)
+        row_vals, row_idx = row_scores.topk(
+            self.topk_axis, dim=-1
+        )  # shape: [B, T, topk_axis] (both)
         col_vals, col_idx = col_scores.topk(self.topk_axis, dim=-1)
 
-        idx = row_idx.unsqueeze(-1) * self.Ktr + col_idx.unsqueeze(-2)  # shape: [B, T, topk_axis, topk_axis]
+        idx = row_idx.unsqueeze(-1) * self.Ktr + col_idx.unsqueeze(
+            -2
+        )  # shape: [B, T, topk_axis, topk_axis]
         idx = idx.reshape(B, T, -1)  # shape: [B, T, topk_axis**2]
 
-        row_ste = (torch.ones_like(row_vals) - torch.sigmoid(row_vals)).detach() + torch.sigmoid(row_vals)
-        col_ste = (torch.ones_like(col_vals) - torch.sigmoid(col_vals)).detach() + torch.sigmoid(col_vals)
-        weight = (row_ste.unsqueeze(-1) * col_ste.unsqueeze(-2)).reshape(B, T, -1)  # exactly 1.0 forward
+        row_ste = (
+            torch.ones_like(row_vals) - torch.sigmoid(row_vals)
+        ).detach() + torch.sigmoid(row_vals)
+        col_ste = (
+            torch.ones_like(col_vals) - torch.sigmoid(col_vals)
+        ).detach() + torch.sigmoid(col_vals)
+        weight = (row_ste.unsqueeze(-1) * col_ste.unsqueeze(-2)).reshape(
+            B, T, -1
+        )  # exactly 1.0 forward
 
         # Ktr**2 can exceed Kt when Kt isn't a perfect square; clamp out-of-range grid corners
         # onto the last concept id instead of indexing out of bounds
@@ -185,25 +163,31 @@ class PrototypePredictor(nn.Module):
     forward(x, idx, weight) -> k_dense: idx/weight are both [B, T, C].
     """
 
-    def __init__(self, in_embeddings, out_concepts, proto_token_ids, backbone, key_dim=None):
+    def __init__(
+        self, in_embeddings, out_concepts, proto_token_ids, backbone, key_dim=None
+    ):
         super().__init__()
         d = in_embeddings
         Kt = out_concepts
-        assert proto_token_ids.shape[0] == Kt, (
-            f"proto_token_ids has {proto_token_ids.shape[0]} concepts, expected {Kt}"
-        )
+        assert (
+            proto_token_ids.shape[0] == Kt
+        ), f"proto_token_ids has {proto_token_ids.shape[0]} concepts, expected {Kt}"
         self.Kt = Kt
         H = key_dim or min(d, 32)  # a scoring key doesn't need the full hidden width
 
         self.backbone = backbone  # shared with the main model; see module docstring
-        proto_token_ids = proto_token_ids.reshape(Kt, -1, proto_token_ids.shape[-1])  # [Kt, P, Tp]
+        proto_token_ids = proto_token_ids.reshape(
+            Kt, -1, proto_token_ids.shape[-1]
+        )  # [Kt, P, Tp]
         Tp = proto_token_ids.shape[-1]
         assert Tp <= backbone.block_size, (
             f"prototype tokens ({Tp}) exceed the backbone's block_size ({backbone.block_size}); "
             "reduce max_prototype_tokens or increase block_size"
         )
-        self.register_buffer('proto_token_ids', proto_token_ids, persistent=False)
-        self.register_buffer('value', _fixed_value_axis(proto_token_ids), persistent=False)
+        self.register_buffer("proto_token_ids", proto_token_ids, persistent=False)
+        self.register_buffer(
+            "value", _fixed_value_axis(proto_token_ids), persistent=False
+        )
 
         self.proto_query = nn.Linear(d, H, bias=False)
         self.proto_key = nn.Linear(d, H, bias=False)
@@ -214,16 +198,22 @@ class PrototypePredictor(nn.Module):
         P, Tp = self.proto_token_ids.shape[1:]
 
         # only encode the distinct concepts some token actually picked, each at most once
-        unique_idx, inverse = torch.unique(idx, return_inverse=True)  # unique_idx: [U]; inverse: [B, T, C]
+        unique_idx, inverse = torch.unique(
+            idx, return_inverse=True
+        )  # unique_idx: [U]; inverse: [B, T, C]
         proto_ids_selected = self.proto_token_ids[unique_idx]  # shape: [U, P, Tp]
 
         # always causal: prototypes are static reference text being read, not generated
-        hidden = self.backbone(proto_ids_selected.reshape(-1, Tp))  # shape: [U*P, Tp, d]
+        hidden = self.backbone(
+            proto_ids_selected.reshape(-1, Tp)
+        )  # shape: [U*P, Tp, d]
         hidden = hidden.reshape(unique_idx.shape[0], P, Tp, -1)  # shape: [U, P, Tp, d]
-        proto_emb_selected = _masked_mean_pool(hidden, proto_ids_selected)  # shape: [U, P, d]
+        proto_emb_selected = _masked_mean_pool(
+            hidden, proto_ids_selected
+        )  # shape: [U, P, d]
         key_selected = self.proto_key(proto_emb_selected)  # shape: [U, P, H]
 
-        if x.device.type == 'mps':
+        if x.device.type == "mps":
             # MPS crashes (SIGTRAP, in its buffer allocator) when this gather's backward has to
             # scatter into a buffer shaped by U, which changes every step. Route through a fixed
             # [Kt, P, H] buffer instead -- only cheap because Kt is small here (linear_selector).
@@ -234,17 +224,25 @@ class PrototypePredictor(nn.Module):
             key_cand = key_selected[inverse]  # shape: [B, T, C, P, H]
 
         q = self.proto_query(x)  # shape: [B, T, H]
-        wei = torch.einsum('bth,btcph->btcp', q, key_cand) / (key_cand.shape[-1] ** 0.5)  # shape: [B, T, C, P]
-        wei_p = wei.softmax(dim=-1)  # normalize over this candidate's own P prototypes only
+        wei = torch.einsum("bth,btcph->btcp", q, key_cand) / (
+            key_cand.shape[-1] ** 0.5
+        )  # shape: [B, T, C, P]
+        wei_p = wei.softmax(
+            dim=-1
+        )  # normalize over this candidate's own P prototypes only
         # concepts are independent of each other, no softmax across candidates, matching
         # SparseEmbeddingToConcept's sigmoid semantics
 
         # weight is exactly 1.0 in the forward pass, so this equals wei_p @ self.value, a pure
         # convex combination
-        candidate_score = (wei_p @ self.value) * weight  # shape: [B, T, C, P] @ [P] -> [B, T, C]
+        candidate_score = (
+            wei_p @ self.value
+        ) * weight  # shape: [B, T, C, P] @ [P] -> [B, T, C]
 
         k_dense = x.new_zeros(B, T, self.Kt)
-        k_dense.scatter_add_(dim=-1, index=idx, src=candidate_score)  # 0 everywhere not selected
+        k_dense.scatter_add_(
+            dim=-1, index=idx, src=candidate_score
+        )  # 0 everywhere not selected
         return k_dense
 
 
@@ -273,17 +271,27 @@ class LiftedTokenPredictor(nn.Module):
     forward(x, idx, weight) -> k_dense: idx/weight are both [B, T, C].
     """
 
-    _NEG_MASK_VALUE = -1e9  # additive mask: large-but-finite, so an all-padded group softmaxes to
+    _NEG_MASK_VALUE = (
+        -1e9
+    )  # additive mask: large-but-finite, so an all-padded group softmaxes to
     # uniform (not NaN) -- true -inf can leak NaN into the backward pass even through a later
     # masked_fill/where, since softmax's own backward formula uses its (possibly all-NaN) output
 
-    def __init__(self, in_embeddings, out_concepts, proto_token_ids, backbone, key_dim=None, top_k=5):
+    def __init__(
+        self,
+        in_embeddings,
+        out_concepts,
+        proto_token_ids,
+        backbone,
+        key_dim=None,
+        top_k=5,
+    ):
         super().__init__()
         d = in_embeddings
         Kt = out_concepts
-        assert proto_token_ids.shape[0] == Kt, (
-            f"proto_token_ids has {proto_token_ids.shape[0]} concepts, expected {Kt}"
-        )
+        assert (
+            proto_token_ids.shape[0] == Kt
+        ), f"proto_token_ids has {proto_token_ids.shape[0]} concepts, expected {Kt}"
         assert tuple(proto_token_ids.shape[1:]) == (2, top_k), (
             f"proto_token_ids shape {tuple(proto_token_ids.shape[1:])} != (2, {top_k}) "
             "(axis 1: 0=negative, 1=positive -- see data.utils.load_lifted_token_prototypes)"
@@ -292,9 +300,11 @@ class LiftedTokenPredictor(nn.Module):
         self.top_k = top_k
 
         self.backbone = backbone  # shared with the main model; see module docstring
-        self.register_buffer('proto_token_ids', proto_token_ids, persistent=False)
+        self.register_buffer("proto_token_ids", proto_token_ids, persistent=False)
 
-        self.register_buffer('value', torch.tensor([-1.] * top_k + [1.] * top_k), persistent=False)
+        self.register_buffer(
+            "value", torch.tensor([-1.0] * top_k + [1.0] * top_k), persistent=False
+        )
         self.proto_query = nn.Linear(d, d, bias=False)
         # cosine similarity between unit vectors concentrates tightly around 0 in high dimensions
         # (std ~= 1/sqrt(d)), so softmax over raw cosine sims is nearly uniform regardless of how
@@ -307,36 +317,52 @@ class LiftedTokenPredictor(nn.Module):
         B, T = x.shape[:2]
 
         # only encode the distinct concepts some token actually picked, each at most once
-        unique_idx, inverse = torch.unique(idx, return_inverse=True)  # unique_idx: [U]; inverse: [B, T, C]
-        proto_ids_selected = self.proto_token_ids[unique_idx]  # shape: [U, 2, top_k], single token ids
+        unique_idx, inverse = torch.unique(
+            idx, return_inverse=True
+        )  # unique_idx: [U]; inverse: [B, T, C]
+        proto_ids_selected = self.proto_token_ids[
+            unique_idx
+        ]  # shape: [U, 2, top_k], single token ids
 
         # validity from the raw (possibly -1 = "no lifted token here") ids, before any clamping --
         # token id 0 is '<|endoftext|>', a real token that can legitimately be a lifted token
         # itself, so it must not be mistaken for padding (see data.utils.load_lifted_token_prototypes)
         valid_selected = proto_ids_selected >= 0  # shape: [U, 2, top_k]
-        proto_ids_safe = proto_ids_selected.clamp(min=0)  # -1 -> 0, a valid (if dummy) embedding id;
+        proto_ids_safe = proto_ids_selected.clamp(
+            min=0
+        )  # -1 -> 0, a valid (if dummy) embedding id;
         # only used for the lookup below -- its actual embedding never matters, since invalid
         # slots are masked out of the softmax before they can affect anything
 
         # each prototype is exactly one token: a length-1 sequence per prototype, so there's no
         # sentence to average-pool -- squeeze the trivial length-1 axis back out instead
-        hidden = self.backbone(proto_ids_safe.reshape(-1, 1))  # shape: [U*2*top_k, 1, d]
-        hidden = hidden.squeeze(1).view(unique_idx.shape[0], 2, self.top_k, -1)  # [U, 2, top_k, d]
+        hidden = self.backbone(
+            proto_ids_safe.reshape(-1, 1)
+        )  # shape: [U*2*top_k, 1, d]
+        hidden = hidden.squeeze(1).view(
+            unique_idx.shape[0], 2, self.top_k, -1
+        )  # [U, 2, top_k, d]
         # x and h are compared in the exact same learned space (same proto_query for both), so
         # nothing bounds the raw dot product's magnitude -- gradients on proto_query get pulled
         # from both its "query" and "key" role every step, reinforcing growth along its own
         # dominant direction. Cosine similarity removes that degree of freedom: only the angle
         # between x and h matters, not how large proto_query's weights have grown.
-        key_selected = F.normalize(self.proto_query(hidden), dim=-1)  # shape: [U, 2, top_k, H]
+        key_selected = F.normalize(
+            self.proto_query(hidden), dim=-1
+        )  # shape: [U, 2, top_k, H]
 
-        if x.device.type == 'mps':
+        if x.device.type == "mps":
             # see PrototypePredictor.forward: MPS crashes when this gather's backward scatters
             # into a buffer shaped by U, which changes every step. Route through a fixed
             # [Kt, 2, top_k, H] buffer instead -- cheap since Kt is small (see nn.bottleneck).
-            key_all = key_selected.new_zeros(self.Kt, 2, self.top_k, key_selected.shape[-1])
+            key_all = key_selected.new_zeros(
+                self.Kt, 2, self.top_k, key_selected.shape[-1]
+            )
             key_all[unique_idx] = key_selected
             key_cand = key_all[idx]  # shape: [B, T, C, 2, top_k, H]
-            valid_all = proto_ids_selected.new_zeros(self.Kt, 2, self.top_k, dtype=torch.bool)
+            valid_all = proto_ids_selected.new_zeros(
+                self.Kt, 2, self.top_k, dtype=torch.bool
+            )
             valid_all[unique_idx] = valid_selected
             valid_cand = valid_all[idx]  # shape: [B, T, C, 2, top_k]
         else:
@@ -344,12 +370,16 @@ class LiftedTokenPredictor(nn.Module):
             valid_cand = valid_selected[inverse]  # shape: [B, T, C, 2, top_k]
 
         q = F.normalize(self.proto_query(x), dim=-1)  # shape: [B, T, H]
-        raw = torch.einsum('bth,btcgkh->btcgk', q, key_cand)  # [B, T, C, 2, top_k], cosine similarity in [-1, 1]
+        raw = torch.einsum(
+            "bth,btcgkh->btcgk", q, key_cand
+        )  # [B, T, C, 2, top_k], cosine similarity in [-1, 1]
         # clamp the log-value, not exp()'s result: exp() overflows to inf before a post-hoc clamp
         # could catch it, and inf's gradient combined with clamp's zero-grad region there
         # produces 0*inf = nan for logit_scale -- silently reintroducing the same failure this
         # temperature exists to prevent.
-        scale = self.logit_scale.clamp(max=math.log(100)).exp()  # bounded temperature, see __init__
+        scale = self.logit_scale.clamp(
+            max=math.log(100)
+        ).exp()  # bounded temperature, see __init__
         raw = raw * scale
         raw = raw.masked_fill(~valid_cand, self._NEG_MASK_VALUE)
         wei_p = raw.flatten(-2, -1).softmax(dim=-1)  # [B, T, C, 2*top_k]
@@ -357,10 +387,14 @@ class LiftedTokenPredictor(nn.Module):
         # convex combination of exactly +1 (positive) and -1 (negative), weighted by the
         # renormalized (max_pos, max_neg) pair; eps guards the (should-be-rare) case where a
         # concept has no valid tokens in either direction at all
-        candidate_score = (wei_p @ self.value) * weight  # shape: [B, T, C, 2*top_k] @ [2*top_k] -> [B, T, C]
+        candidate_score = (
+            wei_p @ self.value
+        ) * weight  # shape: [B, T, C, 2*top_k] @ [2*top_k] -> [B, T, C]
 
         k_dense = x.new_zeros(B, T, self.Kt)
-        k_dense.scatter_add_(dim=-1, index=idx, src=candidate_score)  # 0 everywhere not selected
+        k_dense.scatter_add_(
+            dim=-1, index=idx, src=candidate_score
+        )  # 0 everywhere not selected
         return k_dense
 
 
@@ -371,7 +405,9 @@ class PrototypeConceptEncoder(BaseConceptLayer):
     """
 
     def __init__(self, in_embeddings, out_concepts, selector, predictor):
-        super().__init__(out_concepts=out_concepts, in_concepts=None, in_embeddings=in_embeddings)
+        super().__init__(
+            out_concepts=out_concepts, in_concepts=None, in_embeddings=in_embeddings
+        )
         self.selector = selector
         self.predictor = predictor
         self.K = nn.Parameter(
@@ -403,14 +439,25 @@ class PrototypeCrossAttention(BaseConceptLayer):
     FlashAttention makes).
     """
 
-    def __init__(self, in_embeddings, out_concepts, proto_token_ids, backbone,
-                 chunk_size=4096, key_dim=None, top_k=None, use_checkpoint=True):
-        super().__init__(out_concepts=out_concepts, in_concepts=None, in_embeddings=in_embeddings)
+    def __init__(
+        self,
+        in_embeddings,
+        out_concepts,
+        proto_token_ids,
+        backbone,
+        chunk_size=4096,
+        key_dim=None,
+        top_k=None,
+        use_checkpoint=True,
+    ):
+        super().__init__(
+            out_concepts=out_concepts, in_concepts=None, in_embeddings=in_embeddings
+        )
         d = self.in_embeddings_shape
         Kt = self.out_concepts_shape
-        assert proto_token_ids.shape[0] == Kt, (
-            f"proto_token_ids has {proto_token_ids.shape[0]} concepts, expected {Kt}"
-        )
+        assert (
+            proto_token_ids.shape[0] == Kt
+        ), f"proto_token_ids has {proto_token_ids.shape[0]} concepts, expected {Kt}"
         self.Kt = Kt
         self.chunk_size = min(chunk_size, Kt)
         self.top_k = top_k
@@ -420,14 +467,20 @@ class PrototypeCrossAttention(BaseConceptLayer):
         # only the cheap token embedding table is used here: this class touches all Kt concepts
         # every call and can't afford a full backbone pass per concept
         self.embedding_table = backbone.token_embedding_table
-        proto_token_ids = proto_token_ids.reshape(Kt, -1, proto_token_ids.shape[-1])  # [Kt, P, Tp]
-        self.register_buffer('proto_token_ids', proto_token_ids, persistent=False)
-        self.register_buffer('value', _fixed_value_axis(proto_token_ids), persistent=False)
+        proto_token_ids = proto_token_ids.reshape(
+            Kt, -1, proto_token_ids.shape[-1]
+        )  # [Kt, P, Tp]
+        self.register_buffer("proto_token_ids", proto_token_ids, persistent=False)
+        self.register_buffer(
+            "value", _fixed_value_axis(proto_token_ids), persistent=False
+        )
 
         self.proto_query = nn.Linear(d, H, bias=False)
         self.proto_key = nn.Linear(d, H, bias=False)
 
-        self.K = nn.Parameter(torch.randn(Kt, d) * 0.02)  # value/reconstruction table, as in SparseEmbeddingToConcept
+        self.K = nn.Parameter(
+            torch.randn(Kt, d) * 0.02
+        )  # value/reconstruction table, as in SparseEmbeddingToConcept
 
     def _score_chunk(self, q, proto_ids_chunk):
         """q: [B, T, H]; proto_ids_chunk: [chunk, P, Tp] -> [B, T, chunk] independent per-concept
@@ -435,8 +488,12 @@ class PrototypeCrossAttention(BaseConceptLayer):
         hidden = self.embedding_table(proto_ids_chunk)  # shape: [chunk, P, Tp, d]
         proto_emb = _masked_mean_pool(hidden, proto_ids_chunk)  # [chunk, P, d]
         k = self.proto_key(proto_emb)  # shape: [chunk, P, H]
-        wei = torch.einsum('bth,cph->btcp', q, k) / (k.shape[-1] ** 0.5)  # shape: [B, T, chunk, P]
-        wei_p = wei.softmax(dim=-1)  # normalize over this concept's own P prototypes only
+        wei = torch.einsum("bth,cph->btcp", q, k) / (
+            k.shape[-1] ** 0.5
+        )  # shape: [B, T, chunk, P]
+        wei_p = wei.softmax(
+            dim=-1
+        )  # normalize over this concept's own P prototypes only
         return wei_p @ self.value  # shape: [B, T, chunk, P] @ [P] -> [B, T, chunk]
 
     def activation(self, x):
@@ -444,9 +501,11 @@ class PrototypeCrossAttention(BaseConceptLayer):
 
         chunks = []
         for start in range(0, self.Kt, self.chunk_size):
-            proto_ids_chunk = self.proto_token_ids[start:start + self.chunk_size]
+            proto_ids_chunk = self.proto_token_ids[start : start + self.chunk_size]
             if self.use_checkpoint and self.training:
-                chunk_scores = _checkpoint(self._score_chunk, q, proto_ids_chunk, use_reentrant=False)
+                chunk_scores = _checkpoint(
+                    self._score_chunk, q, proto_ids_chunk, use_reentrant=False
+                )
             else:
                 chunk_scores = self._score_chunk(q, proto_ids_chunk)
             chunks.append(chunk_scores)

@@ -44,7 +44,9 @@ class MultiHeadAttention(nn.Module):
             # is_causal=True: fused kernel, each position only sees itself and earlier ones.
             # Default path, so the common case skips the general masked kernel below.
             out = F.scaled_dot_product_attention(
-                q, k, v,
+                q,
+                k,
+                v,
                 dropout_p=self.dropout_p if self.training else 0.0,
                 is_causal=True,
             )  # shape: [B, num_heads, T, head_size]
@@ -52,12 +54,16 @@ class MultiHeadAttention(nn.Module):
             # a custom mask (e.g. block-causal) can't use the fused is_causal kernel, so it
             # goes through the general masked path instead
             out = F.scaled_dot_product_attention(
-                q, k, v,
+                q,
+                k,
+                v,
                 attn_mask=attn_mask,
                 dropout_p=self.dropout_p if self.training else 0.0,
             )  # shape: [B, num_heads, T, head_size]
 
-        out = out.transpose(1, 2).contiguous().view(B, T, C)  # merge heads back: -> [B, T, C]
+        out = (
+            out.transpose(1, 2).contiguous().view(B, T, C)
+        )  # merge heads back: -> [B, T, C]
         out = self.proj(out)
         out = self.resid_dropout(out)
         return out
@@ -68,14 +74,18 @@ class FeedForward(nn.Module):
 
     def __init__(self, n_embed, dropout):
         super().__init__()
-        hidden_dim = int(4 * n_embed * 2 / 3)  # keep param count close to a standard 4x MLP despite the extra gate projection
+        hidden_dim = int(
+            4 * n_embed * 2 / 3
+        )  # keep param count close to a standard 4x MLP despite the extra gate projection
         self.w1 = nn.Linear(n_embed, hidden_dim, bias=False)
         self.w2 = nn.Linear(n_embed, hidden_dim, bias=False)
         self.w3 = nn.Linear(hidden_dim, n_embed, bias=False)
         self.dropout = nn.Dropout(dropout)
 
     def forward(self, x):
-        out = F.silu(self.w1(x)) * self.w2(x)  # shape: [B, T, hidden_dim], elementwise gate
+        out = F.silu(self.w1(x)) * self.w2(
+            x
+        )  # shape: [B, T, hidden_dim], elementwise gate
         out = self.w3(out)  # shape: [B, T, hidden_dim] -> [B, T, n_embed]
         out = self.dropout(out)
         return out
@@ -87,15 +97,52 @@ class Block(nn.Module):
     def __init__(self, n_embed, num_heads, dropout, num_kv_heads):
         super().__init__()
         head_size = n_embed // num_heads
-        self.sa_head = MultiHeadAttention(num_heads, head_size, n_embed, dropout, num_kv_heads=num_kv_heads)
+        self.sa_head = MultiHeadAttention(
+            num_heads, head_size, n_embed, dropout, num_kv_heads=num_kv_heads
+        )
         self.ffwd = FeedForward(n_embed, dropout)
         self.ln1 = nn.LayerNorm(n_embed)
         self.ln2 = nn.LayerNorm(n_embed)
 
     def forward(self, x, attn_mask=None):
         # normalize each sub-layer's input, not the residual stream itself
-        x = x + self.sa_head(self.ln1(x), attn_mask)  # residual connection around attention
+        x = x + self.sa_head(
+            self.ln1(x), attn_mask
+        )  # residual connection around attention
         x = x + self.ffwd(self.ln2(x))  # residual connection around the feedforward
+        return x
+
+
+class TokensToEmbeddings(nn.Module):
+    """Token and position embeddings, without the transformer stack."""
+
+    def __init__(self, vocab_size, n_embed, block_size):
+        super().__init__()
+        self.vocab_size = vocab_size
+        self.n_embed = n_embed
+        self.block_size = block_size
+        self.token_embedding_table = nn.Embedding(vocab_size, n_embed)
+        self.position_embedding_table = nn.Embedding(block_size, n_embed)
+
+        self.apply(self._init_weights)
+
+    def _init_weights(self, module):
+        if isinstance(module, nn.Linear):
+            nn.init.normal_(module.weight, mean=0.0, std=0.02)
+            if module.bias is not None:
+                nn.init.zeros_(module.bias)
+        elif isinstance(module, nn.Embedding):
+            nn.init.normal_(module.weight, mean=0.0, std=0.02)
+
+    def forward(self, idx):
+        B, T = idx.shape
+        token_emb = self.token_embedding_table(idx)  # shape: [B, T] -> [B, T, n_embed]
+        pos_emb = self.position_embedding_table(
+            torch.arange(T, device=idx.device)
+        )  # shape: [T, n_embed]
+        x = (
+            token_emb + pos_emb
+        )  # broadcast add: [B, T, n_embed] + [T, n_embed] -> [B, T, n_embed]
         return x
 
 
@@ -106,21 +153,36 @@ class TransformerModel(nn.Module):
     (see ConceptBottleneck), not this raw output.
     """
 
-    def __init__(self, vocab_size, n_embed, block_size, num_heads, n_layers, dropout, num_kv_heads):
+    def __init__(
+        self,
+        n_embed,
+        block_size,
+        num_heads,
+        n_layers,
+        dropout,
+        num_kv_heads,
+        attn_mask=None,
+    ):
         super().__init__()
         self.block_size = block_size
         self.n_layers = n_layers
-        self.token_embedding_table = nn.Embedding(vocab_size, n_embed)
-        self.position_embedding_table = nn.Embedding(block_size, n_embed)
         # ModuleList (not Sequential) so forward() can pass attn_mask through to every block
-        self.blocks = nn.ModuleList([Block(n_embed, num_heads, dropout, num_kv_heads) for _ in range(n_layers)])
+        self.blocks = nn.ModuleList(
+            [Block(n_embed, num_heads, dropout, num_kv_heads) for _ in range(n_layers)]
+        )
         self.ln_f = nn.LayerNorm(n_embed)
 
         self.apply(self._init_weights)
         # shrink residual-writing projections so variance doesn't grow with depth (GPT-2-style init)
         for name, p in self.named_parameters():
-            if name.endswith('proj.weight') or name.endswith('w3.weight'):
+            if name.endswith("proj.weight") or name.endswith("w3.weight"):
                 nn.init.normal_(p, mean=0.0, std=0.02 / math.sqrt(2 * n_layers))
+
+        if attn_mask is not None:
+            # non-persistent: it's cheap to rebuild and shouldn't be saved into/loaded from checkpoints
+            self.register_buffer("_attn_mask", attn_mask, persistent=False)
+        else:
+            self.register_buffer("_attn_mask", None)
 
     def _init_weights(self, module):
         if isinstance(module, nn.Linear):
@@ -130,12 +192,8 @@ class TransformerModel(nn.Module):
         elif isinstance(module, nn.Embedding):
             nn.init.normal_(module.weight, mean=0.0, std=0.02)
 
-    def forward(self, idx, attn_mask=None):
-        B, T = idx.shape
-        token_emb = self.token_embedding_table(idx)  # shape: [B, T] -> [B, T, n_embed]
-        pos_emb = self.position_embedding_table(torch.arange(T, device=idx.device))  # shape: [T, n_embed]
-        x = token_emb + pos_emb  # broadcast add: [B, T, n_embed] + [T, n_embed] -> [B, T, n_embed]
+    def forward(self, x):
         for block in self.blocks:
-            x = block(x, attn_mask)
+            x = block(x, self._attn_mask)
         x = self.ln_f(x)
-        return x  # shape: [B, T, n_embed], hidden state ready for the concept bottleneck
+        return x  # shape: [B, T, n_embed]

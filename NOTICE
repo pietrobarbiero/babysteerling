@@ -1,5 +1,5 @@
-babysteerling
-Copyright 2026 Pietro Barbiero
+Baby Steerling: Interpretable Language Models
+Copyright 2026 PyC Team
 
 This project independently implements ideas described in Guide Labs' technical report
 "Scaling Inherently Interpretable Language Models" and their public Steerling repository

@@ -4,6 +4,7 @@ Kept separate from the Atlas stages (tag/cluster/assign/tokenize): this is one-t
 setup, not concept annotation, and stays the same no matter which annotation hyperparameters a
 build_dataset run uses.
 """
+
 import os
 import urllib.request
 
@@ -27,7 +28,9 @@ def download_corpus(url, output_path):
     print(f"Downloaded corpus to {output_path}")
 
 
-def train_tokenizer(input_paths, output_path, vocab_size=2000, boundary_token="<|endoftext|>"):
+def train_tokenizer(
+    input_paths, output_path, vocab_size=2000, boundary_token="<|endoftext|>"
+):
     """Trains a byte-level BPE tokenizer on one or more corpus files.
 
     `input_paths` can be a single path or a list. Pass every source's file when building a
@@ -46,7 +49,9 @@ def train_tokenizer(input_paths, output_path, vocab_size=2000, boundary_token="<
         return
     if isinstance(input_paths, str):
         input_paths = [input_paths]
-    print(f"Training a byte-level BPE tokenizer (vocab_size={vocab_size}) on {len(input_paths)} file(s)...")
+    print(
+        f"Training a byte-level BPE tokenizer (vocab_size={vocab_size}) on {len(input_paths)} file(s)..."
+    )
     tokenizer = ByteLevelBPETokenizer()
     tokenizer.train(
         files=input_paths,
@@ -56,4 +61,6 @@ def train_tokenizer(input_paths, output_path, vocab_size=2000, boundary_token="<
     )
     os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
     tokenizer.save(output_path)
-    print(f"Trained tokenizer with vocab_size={tokenizer.get_vocab_size()}, saved to {output_path}")
+    print(
+        f"Trained tokenizer with vocab_size={tokenizer.get_vocab_size()}, saved to {output_path}"
+    )

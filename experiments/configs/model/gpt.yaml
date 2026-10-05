@@ -1,7 +1,0 @@
-# Causal backbone, no concept bottleneck: the plain-LM baseline for steerling_gpt.
-defaults:
-  - base
-  - _self_
-
-wandb_name: gpt
-interpretable: false

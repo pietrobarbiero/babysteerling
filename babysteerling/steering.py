@@ -1,17 +1,3 @@
-"""Steering: push the model's output toward a concept by adding that concept's learned
-embedding direction into the hidden state, at inference time or during training. No prompting,
-no weight updates. Implements Guide Labs' Section 6.2 (see NOTICE): injection h_t^(l) +=
-gamma*e_c for l >= L_inj (Eq. 18), calibrated strength gamma = tau/peak(e_c) (Eq. 19), and
-ReLU-gated logit suppression (Eq. 20-21). Also implements Section 10.2.4's steering-training
-(respond/express losses, Eq. 31-32), using the token-level concept attribution the atlas
-pipeline already computes (Section 4.4's lift metric), instead of a new LLM-tagging stage.
-
-InterventionModule works on any module that returns a [B, T, F] or [B, F] tensor, gated by any
-pytorch_concepts Strategy/Policy pair. It doesn't care if it's wrapping a transformer block
-(hidden-state steering) or a concept head's activation() (concept-level intervention). Plug in a
-new model by giving it a single-tensor-in/out submodule; plug in new intervention behavior by
-subclassing pytorch_concepts' BaseConceptInterventionStrategy/BaseInterventionPolicy.
-"""
 import random
 from contextlib import contextmanager
 
@@ -19,10 +5,7 @@ import torch
 import torch.nn as nn
 from torch.nn import functional as F
 
-from torch_concepts.nn import BaseConceptInterventionStrategy, UniformPolicy
-
-from . import diffusion
-from .data.utils import build_supervision, get_batch
+from torch_concepts.nn import ConceptInterventionStrategy, UniformPolicy
 
 
 def _flatten_to_2d(x):
@@ -35,7 +18,9 @@ def _flatten_to_2d(x):
     if x.dim() == 3:
         B, T, F_ = x.shape
         return x.reshape(B * T, F_), (B, T, F_)
-    raise ValueError(f"expected a 2-D [B,F] or 3-D [B,T,F] tensor, got shape {tuple(x.shape)}")
+    raise ValueError(
+        f"expected a 2-D [B,F] or 3-D [B,T,F] tensor, got shape {tuple(x.shape)}"
+    )
 
 
 def _unflatten(x, original_shape):
@@ -45,14 +30,16 @@ def _unflatten(x, original_shape):
     return x.reshape(B, T, F_)
 
 
-class AddDirectionStrategy(BaseConceptInterventionStrategy):
+class AddDirectionStrategy(ConceptInterventionStrategy):
     """x -> x + gamma*direction (Eq. 18). pytorch_concepts' own strategies replace a value
     outright; this one adds a direction on top of whatever value is already there.
     """
 
     def __init__(self, direction, gamma):
         super().__init__()
-        self.register_buffer('direction', direction.detach())  # buffer, so it moves with .to(device)
+        self.register_buffer(
+            "direction", direction.detach()
+        )  # buffer, so it moves with .to(device)
         self.gamma = gamma
 
     def forward(self, x, *args, **kwargs):
@@ -67,8 +54,15 @@ class InterventionModule(nn.Module):
     build_mask(), and flattens back. Works with any of their (or our) Strategy/Policy classes.
     """
 
-    def __init__(self, original_module, intervention_strategy, intervention_policy,
-                 sel_idx=None, quantile=1.0, eps=1e-12):
+    def __init__(
+        self,
+        original_module,
+        intervention_strategy,
+        intervention_policy,
+        sel_idx=None,
+        quantile=1.0,
+        eps=1e-12,
+    ):
         super().__init__()
         self.original_module = original_module
         self.intervention_strategy = intervention_strategy
@@ -85,8 +79,13 @@ class InterventionModule(nn.Module):
         # build_mask() uses torch.kthvalue, which MPS doesn't support, so run it on CPU and
         # move the result back. Cheap either way, since policy_scores is only [rows, F].
         mask = self.intervention_policy.build_mask(
-            policy_scores.cpu(), sel_idx=self.sel_idx, quantile=self.quantile, eps=self.eps,
-        ).to(device=flat.device, dtype=flat.dtype)  # 1 = keep original, 0 = replace (pytorch_concepts' convention)
+            policy_scores.cpu(),
+            sel_idx=self.sel_idx,
+            quantile=self.quantile,
+            eps=self.eps,
+        ).to(
+            device=flat.device, dtype=flat.dtype
+        )  # 1 = keep original, 0 = replace (pytorch_concepts' convention)
         intervened = self.intervention_strategy(flat)
 
         result = flat * mask + intervened * (1.0 - mask)
@@ -123,6 +122,7 @@ def injected_at(model, direction, gamma, position_mask, inj_layer):
     already known, so no Policy is needed to choose them. Uses a plain forward hook instead of
     InterventionModule, since there's no strategy/policy choice to make here.
     """
+
     def hook(module, inputs, output):
         # These blocks are shared with prototype-based known encoders (nn.prototype.
         # PrototypePredictor), which re-enter them mid-forward to encode prototype texts at a
@@ -131,7 +131,10 @@ def injected_at(model, direction, gamma, position_mask, inj_layer):
             return output
         return inject_at_positions(output, direction, gamma, position_mask)
 
-    handles = [block.register_forward_hook(hook) for block in list(model.backbone.blocks)[inj_layer:]]
+    handles = [
+        block.register_forward_hook(hook)
+        for block in list(model.backbone.blocks)[inj_layer:]
+    ]
     try:
         yield model
     finally:
@@ -155,12 +158,25 @@ def calibrate_gamma(direction, head, tau=4.0):
     injection so its largest effect on any output logit equals tau, giving comparable steering
     strength across concepts without tuning gamma by hand. Needs head_type="linear", since the
     calibration assumes a real linear projection.
+
+    direction may be a single [D] vector shared by the whole batch (returns a float), or a
+    per-row [B, D] batch of directions -- e.g. one concept per window (returns a [B] tensor).
     """
     if head.head_type != "linear":
-        raise ValueError("calibrate_gamma requires head_type='linear' (Eq. 19 assumes a linear LM head)")
-    alignment = head.head.weight @ direction  # shape: [vocab, D] @ [D] -> [vocab], e_c . W_y for every y
-    peak = alignment.max().item()
-    return tau / peak
+        raise ValueError(
+            "calibrate_gamma requires head_type='linear' (Eq. 19 assumes a linear LM head)"
+        )
+    if direction.dim() == 1:
+        alignment = (
+            head.head.weight @ direction
+        )  # shape: [vocab, D] @ [D] -> [vocab], e_c . W_y for every y
+        peak = alignment.max().item()
+        return tau / peak
+    alignment = (
+        direction @ head.head.weight.T
+    )  # shape: [B, D] @ [D, vocab] -> [B, vocab]
+    peak = alignment.max(dim=-1).values  # shape: [B]
+    return tau / peak.clamp(min=1e-6)
 
 
 def suppress_logits(logits, direction, head, strength):
@@ -195,8 +211,14 @@ def inject_at_positions(h, direction, gamma, position_mask):
     """h + gamma*direction (Eq. 18), only where position_mask is True. Same idea as
     AddDirectionStrategy, but for when the positions are already known instead of chosen by a
     Policy (see injected_at()).
+
+    direction/gamma may be a single [D]/float shared across the batch, or a per-row [B, D]/[B]
+    pair -- e.g. one concept per window.
     """
-    delta = gamma * direction  # shape: [D]
+    if direction.dim() == 2:  # [B, D]: one direction (and gamma) per batch row
+        delta = (gamma.unsqueeze(-1) * direction).unsqueeze(1)  # [B, D] -> [B, 1, D]
+    else:
+        delta = gamma * direction  # shape: [D], broadcasts against h's last dim
     return h + position_mask.unsqueeze(-1).to(h.dtype) * delta
 
 
@@ -206,114 +228,14 @@ def sample_steering_target(doc_spans, lifted_tokens):
     target, a different question than a Policy answers (it picks positions within an
     already-chosen target).
     """
-    candidates = sorted({c for _, _, _, concept_ids in doc_spans for c in concept_ids if lifted_tokens.get(c)})
+    candidates = sorted(
+        {
+            c
+            for _, _, concept_ids in doc_spans
+            for c in concept_ids
+            if lifted_tokens.get(c)
+        }
+    )
     if not candidates:
         return None
     return random.choice(candidates)
-
-
-def respond_loss(alpha_k, concept_id, position_mask):
-    """Eq. 31: pushes the injected concept's own activation k_{c,t} toward 1 at its attributed
-    positions, training the concept module to notice the concept it was just steered toward.
-    k: the known head's activation [B, T, n] from a post-injection forward pass. position_mask:
-    [B, T] bool, from positions_for_concept.
-    """
-    if position_mask.sum() == 0:
-        return torch.tensor(0.0, device=alpha_k.device)
-    alpha_c = alpha_k[..., concept_id]  # shape: [B, T, n] -> [B, T]
-    return -torch.log(alpha_c[position_mask].clamp(1e-6, 1.0)).mean()
-
-
-def express_loss(logits, lifted_token_ids, position_mask):
-    """Eq. 32: pushes the model's output distribution, not just its internal activation,
-    toward the concept's lifted tokens at its attributed positions.
-    """
-    if position_mask.sum() == 0 or not lifted_token_ids:
-        return torch.tensor(0.0, device=logits.device)
-    probs = F.softmax(logits, dim=-1)  # shape: [B, T, vocab]
-    lifted = torch.as_tensor(list(lifted_token_ids), device=logits.device)
-    mass = probs.index_select(-1, lifted).sum(dim=-1)  # shape: [B, T, vocab] -> [B, T]
-    return -torch.log(mass[position_mask].clamp(1e-6, 1.0)).mean()
-
-
-@torch.no_grad()
-def steering_ability_metrics(model, xb, doc_spans, lifted_tokens, inj_layer=1, tau=4.0):
-    """Two cheap steering-ability checks, no LLM judge needed: after injecting a sampled
-    concept everywhere via steered(), does the concept's own activation rise (respond_delta),
-    and does the output shift toward its lifted tokens (output_change_delta)? Both come from
-    the same before/after pair of forward passes, so they're directly comparable. Returns None
-    if no concept in this batch has lifted tokens to steer toward.
-    """
-    concept_id = sample_steering_target(doc_spans, lifted_tokens)
-    if concept_id is None:
-        return None
-    direction = concept_direction(model.bottleneck.known.K, concept_id)
-    gamma = calibrate_gamma(direction, model.head, tau)
-    lifted = torch.as_tensor(lifted_tokens[concept_id], device=xb.device)
-
-    logits_before, intermediates_before = model(xb)
-    alpha_before = intermediates_before['alpha_k'][..., concept_id].mean()
-    mass_before = F.softmax(logits_before, dim=-1).index_select(-1, lifted).sum(dim=-1).mean()
-
-    with steered(model, direction, gamma, inj_layer):
-        logits_after, intermediates_after = model(xb)
-    alpha_after = intermediates_after['alpha_k'][..., concept_id].mean()
-    mass_after = F.softmax(logits_after, dim=-1).index_select(-1, lifted).sum(dim=-1).mean()
-
-    return {
-        'respond_delta': (alpha_after - alpha_before).item(),
-        'output_change_delta': (mass_after - mass_before).item(),
-    }
-
-
-def run_steering_batch(model, tokens, doc_records, doc_starts, n_train, n_concepts, split,
-                        block_size, batch_size, device, lifted_tokens, lambda_respond=1.0,
-                        lambda_express=1.0, inj_layer=1, tau=4.0, is_diffusion=False,
-                        mask_token_id=None, diff_block_len=None):
-    """One steering-training step (Section 10.2.4): pick a target concept present in this
-    batch, inject its direction at its attributed positions through the backbone, and score
-    with L_respond/L_express on top of the normal LM loss. Concept/reconstruction/independence
-    losses are left out here, matching the paper's steering phase. Branches on is_diffusion the
-    same way run_batch/run_diffusion_batch do.
-    """
-    xb, yb, starts = get_batch(tokens, split, block_size, batch_size, n_train, device)
-    doc_spans, _ = build_supervision(doc_records, doc_starts, starts, block_size, n_concepts, device)
-
-    if is_diffusion:
-        x_t, corrupt_mask = diffusion.corrupt(xb, mask_token_id, diff_block_len)
-        model_input, lm_target, lm_mask = x_t, xb, corrupt_mask
-    else:
-        model_input, lm_target, lm_mask = xb, yb, None
-
-    def lm_loss_from(logits):
-        B, T, C = logits.shape
-        if lm_mask is None:
-            return F.cross_entropy(logits.view(B * T, C), lm_target.view(B * T))
-        if lm_mask.sum() == 0:
-            return torch.tensor(0.0, device=device)
-        return F.cross_entropy(logits[lm_mask], lm_target[lm_mask])
-
-    concept_id = sample_steering_target(doc_spans, lifted_tokens)
-    if concept_id is None:
-        # nothing steerable in this batch; fall back to a plain LM step instead of stalling
-        logits, _ = model(model_input)
-        lm_loss = lm_loss_from(logits)
-        return lm_loss, {'total': lm_loss.item(), 'lm': lm_loss.item(), 'respond': 0.0, 'express': 0.0, 'concept_id': None}
-
-    direction = concept_direction(model.bottleneck.known.K, concept_id)
-    gamma = calibrate_gamma(direction, model.head, tau)
-    position_mask = positions_for_concept(xb, doc_spans, concept_id, lifted_tokens.get(concept_id, []))
-
-    with injected_at(model, direction, gamma, position_mask, inj_layer):
-        logits, intermediates = model(model_input)
-
-    lm_loss = lm_loss_from(logits)
-    r_loss = respond_loss(intermediates['alpha_k'], concept_id, position_mask)
-    e_loss = express_loss(logits, lifted_tokens.get(concept_id, []), position_mask)
-    total_loss = lm_loss + lambda_respond * r_loss + lambda_express * e_loss
-
-    components = {
-        'total': total_loss.item(), 'lm': lm_loss.item(),
-        'respond': r_loss.item(), 'express': e_loss.item(), 'concept_id': concept_id,
-    }
-    return total_loss, components

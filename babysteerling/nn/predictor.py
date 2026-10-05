@@ -4,14 +4,13 @@ from torch_concepts.nn import BaseConceptLayer
 
 
 class LinearEmbeddingToConcept(BaseConceptLayer):
-    """Projects the bottlenecked hidden state to vocabulary logits.
-    """
+    """Projects the bottlenecked hidden state to vocabulary logits."""
 
-    def __init__(self, in_embeddings, out_concepts, tie_weights=True, tied_embedding=None):
+    def __init__(
+        self, in_embeddings, out_concepts, tie_weights=True, tied_embedding=None
+    ):
         super().__init__(
-            in_embeddings=in_embeddings,
-            out_concepts=out_concepts,
-            in_concepts=None
+            in_embeddings=in_embeddings, out_concepts=out_concepts, in_concepts=None
         )
         d = self.in_embeddings_shape
         vocab_size = self.out_concepts_shape
@@ -29,7 +28,11 @@ class LinearEmbeddingToConcept(BaseConceptLayer):
         Exact (sums to forward(k + u + epsilon)) when head_type="linear", since the head is then a
         single linear map with no bias. Only approximate for head_type="mlp".
         """
-        return self.head(k), self.head(u), self.head(epsilon)  # each: [B, T, d] -> [B, T, vocab_size]
+        return (
+            self.head(k),
+            self.head(u),
+            self.head(epsilon),
+        )  # each: [B, T, d] -> [B, T, vocab_size]
 
 
 class ReluEmbeddingToConcepts(LinearEmbeddingToConcept):
@@ -83,9 +86,17 @@ class ReluEmbeddingToConcepts(LinearEmbeddingToConcept):
                 mask = (summed > 0).to(summed.dtype)
                 summed, k, u, e = summed * mask, k * mask, u * mask, e * mask
             elif isinstance(layer, nn.RMSNorm):
-                eps = layer.eps if layer.eps is not None else torch.finfo(summed.dtype).eps
-                rms = (summed.pow(2).mean(dim=-1, keepdim=True) + eps).sqrt().detach()  # frozen from the true sum
-                scale = layer.weight / rms  # same divisor for every term -> distributes over the k+u+e split
+                eps = (
+                    layer.eps
+                    if layer.eps is not None
+                    else torch.finfo(summed.dtype).eps
+                )
+                rms = (
+                    (summed.pow(2).mean(dim=-1, keepdim=True) + eps).sqrt().detach()
+                )  # frozen from the true sum
+                scale = (
+                    layer.weight / rms
+                )  # same divisor for every term -> distributes over the k+u+e split
                 summed, k, u, e = layer(summed), k * scale, u * scale, e * scale
             else:
                 summed, k, u, e = layer(summed), layer(k), layer(u), layer(e)

@@ -20,12 +20,12 @@ else:
     print(f"Tokenizing chunks from {chunk_concepts_path}...")
     all_ids = []
     doc_records = []
-    with open(chunk_concepts_path, 'r', encoding='utf-8') as f:
+    with open(chunk_concepts_path, "r", encoding="utf-8") as f:
         for line in f:
             chunk = json.loads(line)
             # each chunk is one full story == one document, so <|endoftext|> alone marks
             # the boundary; no separate [EOC] token needed (unlike the paper's multi-chunk docs)
-            ids = tok.encode(chunk['text']).ids
+            ids = tok.encode(chunk["text"]).ids
             ids.append(eot_id)
 
             # record this document's span in the concatenated token stream, so concept_ids
@@ -34,12 +34,14 @@ else:
             all_ids.extend(ids)
             end = len(all_ids)
 
-            doc_records.append({
-                'chunk_id': chunk['chunk_id'],
-                'start': start,
-                'end': end,
-                'concept_ids': chunk['concept_ids'],
-            })
+            doc_records.append(
+                {
+                    "chunk_id": chunk["chunk_id"],
+                    "start": start,
+                    "end": end,
+                    "concept_ids": chunk["concept_ids"],
+                }
+            )
 
     tokens = torch.tensor(all_ids, dtype=torch.long)
     torch.save(tokens, tokens_path)
