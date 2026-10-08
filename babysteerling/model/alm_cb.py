@@ -154,4 +154,26 @@ class ConceptBottleneckALM(ALM, ILM):
             )
             total_loss += self.loss_fn(output, batch, ["steering"])
 
+        # only to diagnose the model: compute causal effect of intervening on concepts
+        B, T, C = batch["known_labels"].shape
+        intervention_mask = batch["random_intervention_ids"] == torch.arange(
+            C, device=batch["random_intervention_ids"].device
+        )
+        intervened_labels_1 = torch.where(intervention_mask, 1.0, batch["known_labels"])
+        output_1 = self.inference.query(
+            query=["next_token"],
+            evidence={"concepts": intervened_labels_1},
+        )
+        intervened_labels_0 = torch.where(intervention_mask, 0.0, batch["known_labels"])
+        output_0 = self.inference.query(
+            query=["next_token"],
+            evidence={"concepts": intervened_labels_0},
+        )
+        total_loss += self.loss_fn(
+            {"next_token_1": output_1, "next_token_0": output_0},
+            batch,
+            None,
+            ["causal_concept_effect"],
+        )
+
         return total_loss
