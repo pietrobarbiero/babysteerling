@@ -137,6 +137,8 @@ class CompositeLoss(nn.Module):
                     eval_metrics[k] = v.item() if isinstance(v, torch.Tensor) else v
             elif isinstance(metric_val, torch.Tensor):
                 eval_metrics[name] = metric_val.item()
+            elif isinstance(metric_val, float):
+                eval_metrics[name] = metric_val
 
             if hasattr(metric, "reset"):
                 metric.reset()
@@ -166,6 +168,28 @@ class TokenLoss(nn.Module, Loss):
         return F.cross_entropy(
             logits.view(B * T, C),
             targets.view(B * T),
+            ignore_index=self.ignore_index,
+        )
+
+
+class TokenResidualLoss(nn.Module, Loss):
+    """Token-level cross-entropy loss."""
+
+    def __init__(self, ignore_index: int = -100):
+        super().__init__()
+        self.ignore_index = ignore_index
+
+    def forward(self, output: dict[str, InferenceOutput], batch: dict) -> torch.Tensor:
+        f_logits = output["next_token"].logits["next_token"]
+        g_out = output["next_token_residual"].value
+        targets = batch["targets"]
+
+        B, T, C = f_logits.shape
+        logits_corrected = f_logits.detach() + g_out
+
+        return F.cross_entropy(
+            logits_corrected.reshape(B * T, C),
+            targets.reshape(B * T),
             ignore_index=self.ignore_index,
         )
 
