@@ -26,3 +26,5 @@ metrics:
     _target_: babysteerling.metric.TokenAccuracy
   concept_auc:
     _target_: babysteerling.metric.ConceptAUC
+  causal_concept_effect:
+    _target_: babysteerling.metric.CausalConceptEffect
